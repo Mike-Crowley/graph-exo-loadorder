@@ -10,6 +10,7 @@
         'graph-connect-then-exo'
         'graph-cancel-then-exo'
         'graph-connect-then-exo-disablewam'
+        'graph-accesstoken-then-exo'
         'exo-then-graph'
         'az-connect-then-exo'
         'pr-graph-import-then-exo'
@@ -49,6 +50,12 @@
             Steps       = @('baseline', 'import-graph', 'connect-graph', 'import-exo', 'connect-exo-disablewam')
             Instruction = 'Sign in at the Graph WAM prompt. EXO then opens a browser sign-in (no WAM); sign in or cancel.'
             Expectation = 'Reaches a sign-in: only the broker path is broken.'
+        }
+        'graph-accesstoken-then-exo'        = @{
+            Steps        = @('baseline', 'import-graph', 'connect-graph-accesstoken', 'import-exo', 'connect-exo')
+            Instruction  = 'First an Az browser sign-in in the harness (it fetches a Graph token without WAM), then an EXO WAM prompt in the window: sign in or cancel.'
+            Expectation  = 'Prediction: EXO works, because Graph handed a token never starts msalruntime.'
+            Precondition = 'AzToken'
         }
         'exo-then-graph'                    = @{
             Steps       = @('baseline', 'import-exo', 'connect-exo', 'import-graph', 'connect-graph')

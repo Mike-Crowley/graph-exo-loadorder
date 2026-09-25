@@ -8,3 +8,5 @@ prbuild/
 # build leftovers
 bin/
 obj/
+# handoff notes about a public thread; local only
+HANDOFF.md

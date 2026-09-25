@@ -61,7 +61,9 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
 $script:TrackedAssemblyPattern = '^(Microsoft\.Identity|Microsoft\.IdentityModel|Azure\.(Identity|Core)|Microsoft\.Graph|Microsoft\.Exchange|Microsoft\.Kiota|Microsoft\.Azure\.PowerShell\.Authentication|Microsoft\.PowerShell\.ThreadJob)'
-$script:ScriptVersion = '2.0'
+$script:ScriptVersion = '2.1'
+# Values that must never reach the JSON or the transcript; Protect-Text replaces them on every write.
+$script:Secrets = @()
 
 # Win32 lookups for the in-process bare-name question. GetModuleHandleW answers "which mapped module does a bare
 # name resolve to right now" without loading anything; LoadLibraryW repeats what a DllImport by bare name ends up
@@ -513,7 +515,9 @@ function Protect-Text {
     # Tenant ID and UPN are not secrets, but they do not belong in files that may end up on GitHub.
     param([string] $Text)
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
-    foreach ($pair in @(@($script:TenantId, '<tenant-id>'), @($script:UserPrincipalName, '<upn>'))) {
+    $pairs = @(@($script:TenantId, '<tenant-id>'), @($script:UserPrincipalName, '<upn>'))
+    foreach ($secret in $script:Secrets) { $pairs += , @($secret, '<token>') }
+    foreach ($pair in $pairs) {
         $value = $pair[0]
         if ([string]::IsNullOrWhiteSpace($value)) { continue }
         $Text = [regex]::Replace($Text, [regex]::Escape($value), $pair[1], [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
@@ -648,6 +652,25 @@ $stepActions = @{
     }
     'connect-graph'          = { Invoke-GraphConnect }
     'connect-graph-cancel'   = { Invoke-GraphConnect }
+    'connect-graph-accesstoken' = {
+        # The harness hands over a Graph token in an environment variable: process memory only, never a file or a
+        # command line. It is read once, removed from this process's environment, added to the scrub list, and given
+        # to Connect-MgGraph as a SecureString, so Graph never touches WAM or msalruntime.
+        $raw = [System.Environment]::GetEnvironmentVariable('LOADORDER_GRAPH_TOKEN')
+        if ([string]::IsNullOrWhiteSpace($raw)) { throw 'LOADORDER_GRAPH_TOKEN is not set; the harness acquires it with Get-AzAccessToken before launching this scenario.' }
+        [System.Environment]::SetEnvironmentVariable('LOADORDER_GRAPH_TOKEN', $null)
+        $script:Secrets += $raw
+        $secure = ConvertTo-SecureString -String $raw -AsPlainText -Force
+        $raw = $null
+        # The AccessToken parameter set has no ContextScope; a supplied token is never persisted anyway.
+        Connect-MgGraph -AccessToken $secure -NoWelcome
+        $ctx = Get-MgContext
+        [ordered]@{
+            SignedIn            = [bool] ($ctx -and $ctx.Account)
+            AuthType            = if ($ctx) { [string] $ctx.AuthType } else { $null }
+            TokenCredentialType = if ($ctx) { [string] $ctx.TokenCredentialType } else { $null }
+        }
+    }
     'connect-az'             = {
         if ([string]::IsNullOrWhiteSpace($script:TenantId)) { throw 'TenantId was not supplied; cannot run connect-az.' }
         Import-Module -Name Az.Accounts -ErrorAction Stop

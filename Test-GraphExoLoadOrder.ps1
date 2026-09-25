@@ -130,6 +130,31 @@ function Test-AzWamPrecondition {
     }
 }
 
+function Test-AzTokenPrecondition {
+    # graph-accesstoken-then-exo needs Az.Accounts as a non-WAM token source; nothing about its config is changed.
+    return [bool] (Get-Module -ListAvailable -Name 'Az.Accounts' | Select-Object -First 1)
+}
+
+function Get-GraphTokenViaAz {
+    # A Graph token from a source that never starts msalruntime. Az on this machine uses the system browser, and the
+    # sign-in is process-scoped, so nothing lands in the profile. The token lives in this process's memory and in
+    # the child's environment block only; the child scrubs it from everything it writes.
+    Import-Module -Name 'Az.Accounts' -ErrorAction Stop
+    Write-Host '    Az browser sign-in for the Graph token: complete it now.' -ForegroundColor Yellow
+    $params = @{
+        Tenant      = $TenantId
+        Scope       = 'Process'
+        ErrorAction = 'Stop'
+    }
+    $null = Connect-AzAccount @params
+    $token = Get-AzAccessToken -ResourceTypeName MSGraph -ErrorAction Stop
+    $value = $token.Token
+    if ($value -is [securestring]) { $value = ConvertFrom-SecureString -SecureString $value -AsPlainText }
+    $null = Disconnect-AzAccount -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($value)) { throw 'Get-AzAccessToken returned no token.' }
+    return $value
+}
+
 function Format-ProcessArgument {
     # Start-Process joins ArgumentList with spaces and does not quote for you.
     param([string] $Value)
@@ -791,6 +816,25 @@ function New-Interpretation {
     else { $rows += New-Claim -Claim 'Az.Accounts WAM sign-in followed by EXO' -Status 'Not run' -Evidence 'Precondition not met on this machine: az-connect-then-exo requires Az.Accounts with EnableLoginByWam = true (Get-AzConfig reported false; Az config was not changed).' }
     $lines += New-ClaimTable -Rows $rows
 
+    # ---------- Finding 5b ----------
+    $lines += '### Finding 5b: a Graph token from a non-WAM source (graph-accesstoken-then-exo)'
+    $lines += ''
+    $rows = @()
+    $tokenRun = $Results['graph-accesstoken-then-exo']
+    if ($tokenRun) {
+        $tokenStep = Get-StepRecord -Result $tokenRun -Name 'connect-graph-accesstoken'
+        $tokenExo = Get-StepRecord -Result $tokenRun -Name 'connect-exo'
+        $tokenExoClass = Get-OutcomeClass -Step $tokenExo
+        $graphBrokerAfterToken = @(Get-Prop -Object $tokenStep.Snapshot -Name 'BrokerRuntimeState' | Where-Object { $_ -and (Get-RowOwner -Row $_) -eq 'Graph' })
+        $graphInteropAfterToken = @(Get-KeyAssemblyRows -Snapshot $tokenStep.Snapshot -Names @('Microsoft.Identity.Client.NativeInterop') | Where-Object { $_.Owner -eq 'Graph' })
+        $exoBrokerAfterToken = @(Get-Prop -Object $tokenExo.Snapshot -Name 'BrokerRuntimeState' | Where-Object { $_ -and (Get-RowOwner -Row $_) -eq 'EXO' })
+        $rows += New-Claim -Claim 'Prediction made before the run: handed a token, Graph never starts msalruntime, so EXO works afterwards' -Status $(if ($tokenExoClass -in @('signed-in', 'cancelled')) { 'Prediction: confirmed' } elseif ($tokenExoClass -eq 'not-run') { 'Prediction' } else { 'Prediction: refuted' }) -Evidence (Get-StepEvidence -ScenarioName 'graph-accesstoken-then-exo' -Step $tokenExo)
+        $rows += New-Claim -Claim 'Connect-MgGraph -AccessToken connected without touching WAM: no msalruntime mapped, no Graph NativeInterop or RuntimeBroker loaded' -Status $(if ($tokenStep.Outcome -eq 'ok' -and @($tokenStep.Snapshot.NativeModules).Count -eq 0 -and $graphInteropAfterToken.Count -eq 0 -and $graphBrokerAfterToken.Count -eq 0) { 'Observed' } elseif ($tokenStep.Outcome -ne 'ok') { 'Observed: the token step failed' } else { 'Observed: differs' }) -Evidence ('{0}; Snapshot.NativeModules: {1}; Graph NativeInterop loaded: {2}; Graph Broker copies: {3}' -f (Get-StepEvidence -ScenarioName 'graph-accesstoken-then-exo' -Step $tokenStep), (Get-NativeSummary -Snapshot $tokenStep.Snapshot), $(if ($graphInteropAfterToken.Count -gt 0) { 'yes' } else { 'no' }), $graphBrokerAfterToken.Count)
+        $rows += New-Claim -Claim ('Connect-ExchangeOnline afterwards: {0}' -f $tokenExoClass) -Status 'Observed' -Evidence ('{0}; NativeModules: {1}; bare-name: {2}; EXO RuntimeBroker: {3}' -f (Get-StepEvidence -ScenarioName 'graph-accesstoken-then-exo' -Step $tokenExo), (Get-NativeSummary -Snapshot $tokenExo.Snapshot), (Get-BareNameSummary -Snapshot $tokenExo.Snapshot).Text, $(if ($exoBrokerAfterToken.Count -gt 0) { 'created=' + $exoBrokerAfterToken[0].LazyCoreValueCreated + ', null=' + $exoBrokerAfterToken[0].CoreIsNull + ', init=' + $(if ($exoBrokerAfterToken[0].InitException) { $exoBrokerAfterToken[0].InitException.Properties.Status } else { 'none' }) } else { 'no Broker copy' }))
+    }
+    else { $rows += New-Claim -Claim 'Graph via -AccessToken from a non-WAM source, then EXO' -Status 'Not run' -Evidence '' }
+    $lines += New-ClaimTable -Rows $rows
+
     # ---------- Finding 6 ----------
     $lines += '### Finding 6: PR #3789 build'
     $lines += ''
@@ -949,6 +993,10 @@ foreach ($name in $script:Definitions.Order) {
             continue
         }
     }
+    if ($definition.Precondition -eq 'AzToken' -and -not (Test-AzTokenPrecondition)) {
+        if ($explicit) { throw ('{0} needs Az.Accounts installed as the non-WAM token source.' -f $name) }
+        continue
+    }
     $selected += $name
 }
 if ($selected.Count -eq 0) { throw 'No scenario selected.' }
@@ -970,7 +1018,19 @@ foreach ($name in $selected) {
     Write-Host ('>>> [{0}/{1}] {2}: {3}' -f $index, $selected.Count, $name, $definition.Instruction) -ForegroundColor Yellow
     if ($Pause) { $null = Read-Host -Prompt '    Press Enter to launch the scenario window' }
 
-    $run = Invoke-Scenario -Name $name -PwshPath $prereq.PwshPath
+    if ($definition.Precondition -eq 'AzToken') {
+        # Token in the environment block for the child only; cleared here the moment the child has exited.
+        $tokenValue = Get-GraphTokenViaAz
+        [System.Environment]::SetEnvironmentVariable('LOADORDER_GRAPH_TOKEN', $tokenValue)
+        try { $run = Invoke-Scenario -Name $name -PwshPath $prereq.PwshPath }
+        finally {
+            [System.Environment]::SetEnvironmentVariable('LOADORDER_GRAPH_TOKEN', $null)
+            $tokenValue = $null
+        }
+    }
+    else {
+        $run = Invoke-Scenario -Name $name -PwshPath $prereq.PwshPath
+    }
     $runs[$name] = $run
     Show-StepOutcome -Run $run
 

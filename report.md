@@ -1,6 +1,6 @@
 # Graph-then-EXO load-order diagnostic
 
-Generated 2026-09-25 09:48. Host: PowerShell 7.6.6 (Core), .NET 10.0.12, Microsoft Windows NT 10.0.26200.0, process X64.
+Generated 2026-09-25 12:10. Host: PowerShell 7.6.6 (Core), .NET 10.0.12, Microsoft Windows NT 10.0.26200.0, process X64.
 Requested modules: Microsoft.Graph.Authentication 2.40.0, ExchangeOnlineManagement 3.10.1. Every scenario ran in its own fresh pwsh -NoProfile process.
 
 Snapshots were taken after every step: tracked managed assemblies with their load context, all load contexts, native msalruntime modules with the in-process bare-name resolution (Win32 GetModuleHandleW/LoadLibraryW and NativeLibrary.TryLoad), DllImport targets and DllImportResolver registrations of every loaded NativeInterop, the AppDomain.AssemblyResolve invocation list, RuntimeBroker statics, and module versions. Full detail is in results\<scenario>.json; host output is in results\<scenario>.transcript.txt. The tenant ID and account hint were scrubbed from both at write time. Status vocabulary: Observed, Inferred, Prediction, Not run.
@@ -9,12 +9,13 @@ Snapshots were taken after every step: tracked managed assemblies with their loa
 
 | Scenario | Child | Completed | Step outcomes | Last connect step class | msalruntime copies |
 |---|---|---|---|---|---|
-| probe-only | 2.0 | True | baseline=ok, import-probe-module=ok |  | 0 |
+| probe-only | 2.1 | True | baseline=ok, import-probe-module=ok |  | 0 |
 | exo-only | 1.0 | True | baseline=ok, import-exo=ok, connect-exo=ok | signed-in | 1 |
 | graph-import-then-exo | 1.0 | True | baseline=ok, import-graph=ok, import-exo=ok, connect-exo=ok | signed-in | 1 |
 | graph-connect-then-exo | 2.0 | True | baseline=ok, import-graph=ok, connect-graph=ok, import-exo=ok, connect-exo=exception | nre-runtimebroker | 2 |
 | graph-cancel-then-exo | 2.0 | True | baseline=ok, import-graph=ok, connect-graph-cancel=ok, import-exo=ok, connect-exo=exception | nre-runtimebroker | 2 |
 | graph-connect-then-exo-disablewam | 1.0 | True | baseline=ok, import-graph=ok, connect-graph=ok, import-exo=ok, connect-exo-disablewam=ok | signed-in | 1 |
+| graph-accesstoken-then-exo | 2.1 | True | baseline=ok, import-graph=ok, connect-graph-accesstoken=ok, import-exo=ok, connect-exo=ok | signed-in | 1 |
 | exo-then-graph | 1.0 | True | baseline=ok, import-exo=ok, connect-exo=ok, import-graph=ok, connect-graph=nonterminating-error | withlogging-missingmethod | 1 |
 
 Defined but not run: az-connect-then-exo, pr-graph-import-then-exo, pr-graph-connect-then-exo, pr-exo-then-graph.
@@ -23,7 +24,7 @@ Defined but not run: az-connect-then-exo, pr-graph-import-then-exo, pr-graph-con
 
 Steps: baseline -> import-probe-module. Instruction given: Nothing to do: no modules, no prompts. Validates the snapshot code.
 
-Child script version 2.0.
+Child script version 2.1.
 
 ### Steps
 
@@ -561,6 +562,108 @@ Source: System.Runtime.Loader.AssemblyLoadContext.AssemblyResolve (static field)
 | Default | System.Runtime.Loader.DefaultAssemblyLoadContext | 116 |  |
 | msgraph-load-context | System.Runtime.Loader.AssemblyLoadContext | 9 |  |
 
+## graph-accesstoken-then-exo
+
+Steps: baseline -> import-graph -> connect-graph-accesstoken -> import-exo -> connect-exo. Instruction given: First an Az browser sign-in in the harness (it fetches a Graph token without WAM), then an EXO WAM prompt in the window: sign in or cancel.
+
+Child script version 2.1.
+
+### Steps
+
+| Step | Outcome | Exception type | Message (first line) |
+|---|---|---|---|
+| baseline | ok |  |  |
+| import-graph | ok |  |  |
+| connect-graph-accesstoken | ok |  |  |
+| import-exo | ok |  |  |
+| connect-exo | ok |  |  |
+
+### Final snapshot (after connect-exo)
+
+| Assembly | Version | Context | Owner | Location |
+|---|---|---|---|---|
+| Microsoft.Identity.Client (duplicate) | 4.83.1.0 | Default | EXO | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.Identity.Client.dll |
+| Microsoft.Identity.Client (duplicate) | 4.83.1.0 | msgraph-load-context | Graph | Microsoft.Graph.Authentication\2.40.0\Dependencies\Core\Microsoft.Identity.Client.dll |
+| Microsoft.Identity.Client.Broker | 4.83.1.0 | Default | EXO | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.Identity.Client.Broker.dll |
+| Microsoft.Identity.Client.NativeInterop | 0.19.4.0 | Default | EXO | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.Identity.Client.NativeInterop.dll |
+| Microsoft.IdentityModel.Abstractions | 8.19.2.0 | Default | EXO | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.IdentityModel.Abstractions.dll |
+| Azure.Identity | 1.18.0.0 | msgraph-load-context | Graph | Microsoft.Graph.Authentication\2.40.0\Dependencies\Azure.Identity.dll |
+
+<details><summary>All tracked assemblies in the final snapshot</summary>
+
+| Assembly | Version | Context | Owner | First seen | Location |
+|---|---|---|---|---|---|
+| Azure.Core | 1.51.1.0 | msgraph-load-context | Graph | import-graph | Microsoft.Graph.Authentication\2.40.0\Dependencies\Core\Azure.Core.dll |
+| Azure.Identity | 1.18.0.0 | msgraph-load-context | Graph | connect-graph-accesstoken | Microsoft.Graph.Authentication\2.40.0\Dependencies\Azure.Identity.dll |
+| Microsoft.Exchange.Management.AdminApiProvider | 15.0.0.0 | Default | EXO | import-exo | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.Exchange.Management.AdminApiProvider.dll |
+| Microsoft.Exchange.Management.ExoPowershellGalleryModule | 15.0.0.0 | Default | EXO | import-exo | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.Exchange.Management.ExoPowershellGalleryModule.dll |
+| Microsoft.Exchange.Management.RestApiClient | 15.0.0.0 | Default | EXO | import-exo | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.Exchange.Management.RestApiClient.dll |
+| Microsoft.Graph.Authentication | 2.40.0.0 | Default | Graph | import-graph | Microsoft.Graph.Authentication\2.40.0\Microsoft.Graph.Authentication.dll |
+| Microsoft.Graph.Authentication.Core | 2.40.0.0 | Default | Graph | import-graph | Microsoft.Graph.Authentication\2.40.0\Microsoft.Graph.Authentication.Core.dll |
+| Microsoft.Identity.Client (duplicate) | 4.83.1.0 | Default | EXO | connect-exo | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.Identity.Client.dll |
+| Microsoft.Identity.Client (duplicate) | 4.83.1.0 | msgraph-load-context | Graph | connect-graph-accesstoken | Microsoft.Graph.Authentication\2.40.0\Dependencies\Core\Microsoft.Identity.Client.dll |
+| Microsoft.Identity.Client.Broker | 4.83.1.0 | Default | EXO | connect-exo | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.Identity.Client.Broker.dll |
+| Microsoft.Identity.Client.Extensions.Msal | 4.83.1.0 | msgraph-load-context | Graph | connect-graph-accesstoken | Microsoft.Graph.Authentication\2.40.0\Dependencies\Core\Microsoft.Identity.Client.Extensions.Msal.dll |
+| Microsoft.Identity.Client.NativeInterop | 0.19.4.0 | Default | EXO | connect-exo | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.Identity.Client.NativeInterop.dll |
+| Microsoft.IdentityModel.Abstractions | 8.19.2.0 | Default | EXO | connect-exo | ExchangeOnlineManagement\3.10.1\netCore\Microsoft.IdentityModel.Abstractions.dll |
+
+</details>
+
+### Native msalruntime
+
+Count in final snapshot: 1
+- EXO: ExchangeOnlineManagement\3.10.1\netCore\runtimes\win-x64\native\msalruntime.dll (first mapped after connect-exo; file version not set; base 0x7FF84DA90000)
+
+Per step (count, then the bare-name resolution result):
+
+- after baseline: 0; nothing mapped under that name
+- after import-graph: 0; nothing mapped under that name
+- after connect-graph-accesstoken: 0; nothing mapped under that name
+- after import-exo: 0; nothing mapped under that name
+- after connect-exo: 1 (EXO: ExchangeOnlineManagement\3.10.1\netCore\runtimes\win-x64\native\msalruntime.dll); GetModuleHandleW -> EXO (ExchangeOnlineManagement\3.10.1\netCore\runtimes\win-x64\native\msalruntime.dll); LoadLibraryW -> EXO (ExchangeOnlineManagement\3.10.1\netCore\runtimes\win-x64\native\msalruntime.dll), same handle: True, freed: True
+
+### DllImport targets in each loaded Microsoft.Identity.Client.NativeInterop (final snapshot)
+
+| NativeInterop copy | Context | P/Invokes | Library names (count) |
+|---|---|---|---|
+| EXO: ExchangeOnlineManagement\3.10.1\netCore\Microsoft.Identity.Client.NativeInterop.dll | Default | 269 | kernel32 (1), libc (4), msalruntime (67), msalruntime_arm (65), msalruntime_arm64 (67), msalruntime_x86 (65) |
+
+### DllImportResolver registrations (final snapshot)
+
+NativeLibrary field: s_nativeDllResolveMap; table exists: False; entries: none
+- NativeInterop EXO (Default): resolver registered = False
+
+### RuntimeBroker statics (final snapshot)
+
+| Broker copy | Context | Lazy Core created | Core is null | s_initException |
+|---|---|---|---|---|
+| EXO | Default | True | False | (null) |
+
+Per step (Lazy Core created / Core is null, per Broker copy):
+
+- after baseline: no Broker assembly loaded
+- after import-graph: no Broker assembly loaded
+- after connect-graph-accesstoken: no Broker assembly loaded
+- after import-exo: no Broker assembly loaded
+- after connect-exo: EXO: created=True, null=False
+
+### AppDomain.AssemblyResolve handlers (invocation order)
+
+Source: System.Runtime.Loader.AssemblyLoadContext.AssemblyResolve (static field)
+
+- after baseline: System.Reflection.Assembly.LoadFromResolveHandler
+- after import-graph: System.Reflection.Assembly.LoadFromResolveHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler
+- after connect-graph-accesstoken: System.Reflection.Assembly.LoadFromResolveHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler
+- after import-exo: System.Reflection.Assembly.LoadFromResolveHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler
+- after connect-exo: System.Reflection.Assembly.LoadFromResolveHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler -> Microsoft.Graph.PowerShell.Authentication.ModuleInitializer.ResolvingHandler
+
+### Load contexts (final snapshot)
+
+| Name | Type | Assemblies | Resolving handlers |
+|---|---|---|---|
+| Default | System.Runtime.Loader.DefaultAssemblyLoadContext | 115 |  |
+| msgraph-load-context | System.Runtime.Loader.AssemblyLoadContext | 5 |  |
+
 ## exo-then-graph
 
 Steps: baseline -> import-exo -> connect-exo -> import-graph -> connect-graph. Instruction given: Sign in at the EXO WAM prompt. Graph is then expected to fail with the WithLogging MissingMethodException before any prompt.
@@ -705,6 +808,14 @@ The "Error Acquiring Token" host text quoted in the issue thread did not appear 
 | Claim | Status | Evidence |
 |---|---|---|
 | Az.Accounts WAM sign-in followed by EXO | Not run | Precondition not met on this machine: az-connect-then-exo requires Az.Accounts with EnableLoginByWam = true (Get-AzConfig reported false; Az config was not changed). |
+
+### Finding 5b: a Graph token from a non-WAM source (graph-accesstoken-then-exo)
+
+| Claim | Status | Evidence |
+|---|---|---|
+| Prediction made before the run: handed a token, Graph never starts msalruntime, so EXO works afterwards | Prediction: confirmed | graph-accesstoken-then-exo.json Steps[connect-exo]: Outcome=ok; Notes.Connected=True |
+| Connect-MgGraph -AccessToken connected without touching WAM: no msalruntime mapped, no Graph NativeInterop or RuntimeBroker loaded | Observed | graph-accesstoken-then-exo.json Steps[connect-graph-accesstoken]: Outcome=ok; Notes.SignedIn=True; Snapshot.NativeModules: 0; Graph NativeInterop loaded: no; Graph Broker copies: 0 |
+| Connect-ExchangeOnline afterwards: signed-in | Observed | graph-accesstoken-then-exo.json Steps[connect-exo]: Outcome=ok; Notes.Connected=True; NativeModules: 1 (EXO: ExchangeOnlineManagement\3.10.1\netCore\runtimes\win-x64\native\msalruntime.dll); bare-name: GetModuleHandleW -> EXO (ExchangeOnlineManagement\3.10.1\netCore\runtimes\win-x64\native\msalruntime.dll); LoadLibraryW -> EXO (ExchangeOnlineManagement\3.10.1\netCore\runtimes\win-x64\native\msalruntime.dll), same handle: True, freed: True; EXO RuntimeBroker: created=True, null=False, init=none |
 
 ### Finding 6: PR #3789 build
 
