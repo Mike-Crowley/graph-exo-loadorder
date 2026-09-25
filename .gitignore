@@ -1,0 +1,10 @@
+# scrubbed transcripts and JSON stay local
+results/
+# third-party sources fetched for reference
+reference/
+# sparse clone of msgraph-sdk-powershell and any build of it
+src/
+prbuild/
+# build leftovers
+bin/
+obj/
