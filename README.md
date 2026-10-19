@@ -105,10 +105,19 @@ The capture code needed no change. The report generator reads the Graph context 
 run with `-GraphVersion` 2.41.0 or later as the isolated build in Finding 6 (the `pr-*` scenarios are then redundant),
 and states the two predictions from the 2026-09-25 comment on #3394 as claims to confirm or refute:
 
-| Prediction | Decided by | Confirmed by | Refuted by |
-|---|---|---|---|
-| Graph-then-EXO still fails: EXO's bare-name P/Invokes reach Graph's already-started `msalruntime` | `graph-connect-then-exo` | `nre-runtimebroker` | a sign-in |
-| EXO-then-Graph is fixed by construction: Graph no longer binds to EXO's MSAL | `exo-then-graph` | a Graph prompt or sign-in | `withlogging-missingmethod`; any other class is a new failure, read from the native rows (two `msalruntime` copies, each `RuntimeBroker`'s state) |
+| Prediction | Decided by | Confirmed by | Refuted by | Observed on 2.41.2 (2026-10-19) |
+|---|---|---|---|---|
+| Graph-then-EXO still fails: EXO's bare-name P/Invokes reach Graph's already-started `msalruntime` | `graph-connect-then-exo` | `nre-runtimebroker` | a sign-in | Refuted: `signed-in`. Two copies mapped, bare name still resolves to Graph's, EXO's P/Invokes still bare-name with no resolver, yet EXO's `RuntimeBroker` started with no init exception |
+| EXO-then-Graph is fixed by construction: Graph no longer binds to EXO's MSAL | `exo-then-graph` | a Graph prompt or sign-in | `withlogging-missingmethod`; any other class is a new failure, read from the native rows (two `msalruntime` copies, each `RuntimeBroker`'s state) | Confirmed: `signed-in`. MSAL 4.83.1 (EXO, Default) and 4.90.0 (Graph, `Microsoft.Graph.Authentication`) coexist; both runtimes started, each on its own copy |
+
+Result of the 2026-10-19 run (`report-2.41.2.md`; PowerShell 7.6.7, ExchangeOnlineManagement 3.10.1): every scenario
+connected, including `graph-cancel-then-exo` (WAM signed in silently again), the `-DisableWAM` and the `-AccessToken`
+variants. The Graph-then-EXO refutation is narrower than it looks: nothing about the binding changed, the second
+startup is simply accepted now. The one number that moved on the native side is the NativeInterop package Graph ships
+(0.20.6 with MSAL 4.90.0, against 0.19.4 in Graph 2.40.0 and still in EXO 3.10.1); `msalruntime.dll` carries no file
+version resource, and the harness does not trace whether the runtime or MSAL's startup call changed. EXO's bare-name
+binding therefore still decides which runtime EXO runs on when Graph connected first; today that copy happens to be
+newer than EXO's own.
 
 Keep the 2.40.0 evidence intact by giving the re-run its own `-ResultsPath` and `-ReportPath`. To report back on
 #3394, quote from `report-2.41.2.md`: the Summary table, Finding 6, the EXO-then-Graph rows of Finding 3, and the

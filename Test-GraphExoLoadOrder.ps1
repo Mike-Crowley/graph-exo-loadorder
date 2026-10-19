@@ -703,7 +703,10 @@ function New-Interpretation {
         $rows += New-Claim -Claim 'EXO''s msalruntime is mapped during Connect-ExchangeOnline, not at import' -Status 'Observed' -Evidence ('graph-connect-then-exo.json Steps[import-exo].Snapshot.NativeModules: {0}; Steps[connect-exo]: {1}{2}' -f (Get-NativeSummary -Snapshot $afterImportExo.Snapshot), (Get-NativeSummary -Snapshot $afterConnectExo.Snapshot), $(if ($exoOnly) { '; exo-only.json Steps[import-exo]: ' + (Get-NativeSummary -Snapshot (Get-StepRecord -Result $exoOnly -Name 'import-exo').Snapshot) + '; Steps[connect-exo]: ' + (Get-NativeSummary -Snapshot (Get-StepRecord -Result $exoOnly -Name 'connect-exo').Snapshot) } else { '' }))
         $natives = @($connectFinal.NativeModules)
         $owners = @($natives | ForEach-Object { Get-RowOwner -Row $_ } | Sort-Object -Unique)
-        $rows += New-Claim -Claim 'After the failure two msalruntime.dll files are mapped, one from each module' -Status $(if ($natives.Count -eq 2 -and $owners -contains 'Graph' -and $owners -contains 'EXO') { 'Observed' } else { 'Observed: contradicted' }) -Evidence ('graph-connect-then-exo.json Steps[connect-exo].Snapshot.NativeModules: {0}' -f (Get-NativeSummary -Snapshot $connectFinal))
+        # On a build where EXO signs in after Graph (2.41.2 did), the same native rows describe a success, so the
+        # failure-specific wording and inferences below switch on the observed class rather than assuming the NRE.
+        $connectFailed = ($connectClass -eq 'nre-runtimebroker')
+        $rows += New-Claim -Claim $(if ($connectFailed) { 'After the failure two msalruntime.dll files are mapped, one from each module' } else { 'After Connect-ExchangeOnline two msalruntime.dll files are mapped, one from each module' }) -Status $(if ($natives.Count -eq 2 -and $owners -contains 'Graph' -and $owners -contains 'EXO') { 'Observed' } else { 'Observed: contradicted' }) -Evidence ('graph-connect-then-exo.json Steps[connect-exo].Snapshot.NativeModules: {0}' -f (Get-NativeSummary -Snapshot $connectFinal))
         $bare = Get-BareNameSummary -Snapshot $connectFinal
         $rows += New-Claim -Claim 'A bare-name request for msalruntime.dll in that process resolves to Graph''s copy' -Status $(if ($bare.Owner -eq 'Graph') { 'Observed' } elseif ($bare.Owner) { 'Observed: contradicted' } else { 'Not captured' }) -Evidence ('graph-connect-then-exo.json Steps[connect-exo].Snapshot: {0}: {1}' -f $bare.Method, $bare.Text)
 
@@ -726,7 +729,7 @@ function New-Interpretation {
             $rows += New-Claim -Claim 'No DllImportResolver is registered for either NativeInterop copy' -Status 'Inferred' -Evidence 'Offline metadata: no MemberRef to NativeLibrary.SetDllImportResolver in NativeInterop 0.19.4. Not captured in-process by this JSON (child < 2.0).'
         }
         $rows += New-Claim -Claim 'EXO''s NativeInterop mapped its own msalruntime by full path (a kernel32 LoadLibrary preload from runtimes\win-x64\native)' -Status 'Inferred' -Evidence 'Basis: offline metadata of NativeInterop 0.19.4 (P/Invoke kernel32!LoadLibrary; string literals "runtimes", "win-x64\native\msalruntime.dll", "PATH") plus the observation that the second mapping appears exactly at connect-exo. The preload call itself was not traced.'
-        $rows += New-Claim -Claim 'EXO''s P/Invokes therefore executed against Graph''s already-started runtime rather than its own mapped copy' -Status 'Inferred' -Evidence 'Basis: the observed bare-name resolution, the observed bare-name DllImport targets, the observed absence of a resolver, and the observed init-exception Context below (a copy that was never started cannot report itself as already started). Binding was not traced with a debugger.'
+        $rows += New-Claim -Claim 'EXO''s P/Invokes therefore executed against Graph''s already-started runtime rather than its own mapped copy' -Status 'Inferred' -Evidence $(if ($connectFailed) { 'Basis: the observed bare-name resolution, the observed bare-name DllImport targets, the observed absence of a resolver, and the observed init-exception Context below (a copy that was never started cannot report itself as already started). Binding was not traced with a debugger.' } else { 'Basis: the observed bare-name resolution, the observed bare-name DllImport targets, and the observed absence of a resolver. Binding was not traced with a debugger.' })
         $brokerStates = @(Get-Prop -Object $connectFinal -Name 'BrokerRuntimeState' | Where-Object { $_ })
         $exoBroker = @($brokerStates | Where-Object { (Get-RowOwner -Row $_) -eq 'EXO' })
         $graphBroker = @($brokerStates | Where-Object { (Get-RowOwner -Row $_) -eq 'Graph' })
@@ -734,7 +737,13 @@ function New-Interpretation {
             $init = $exoBroker[0].InitException
             $status = if ($init -and $init.Properties.PSObject.Properties['Status']) { $init.Properties.Status } else { '(none)' }
             $context = if ($init -and $init.Properties.PSObject.Properties['Context']) { $init.Properties.Context } else { '(none)' }
-            $rows += New-Claim -Claim 'EXO''s RuntimeBroker copy: lazy Core created but null; s_initException = MsalRuntimeException with Status ApiContractViolation and Context "Authenticator Factory has already been started"' -Status $(if ($init -and $status -eq 'ApiContractViolation' -and $context -match 'already been started' -and $exoBroker[0].CoreIsNull) { 'Observed' } else { 'Observed: differs' }) -Evidence ('graph-connect-then-exo.json Steps[connect-exo].Snapshot.BrokerRuntimeState[EXO]: LazyCoreValueCreated={0}; CoreIsNull={1}; InitException.Type={2}; Status={3}; Context="{4}"' -f $exoBroker[0].LazyCoreValueCreated, $exoBroker[0].CoreIsNull, $(if ($init) { $init.Type } else { 'null' }), $status, $context)
+            $exoBrokerEvidence = 'graph-connect-then-exo.json Steps[connect-exo].Snapshot.BrokerRuntimeState[EXO]: LazyCoreValueCreated={0}; CoreIsNull={1}; InitException.Type={2}; Status={3}; Context="{4}"' -f $exoBroker[0].LazyCoreValueCreated, $exoBroker[0].CoreIsNull, $(if ($init) { $init.Type } else { 'null' }), $status, $context
+            if ($connectFailed) {
+                $rows += New-Claim -Claim 'EXO''s RuntimeBroker copy: lazy Core created but null; s_initException = MsalRuntimeException with Status ApiContractViolation and Context "Authenticator Factory has already been started"' -Status $(if ($init -and $status -eq 'ApiContractViolation' -and $context -match 'already been started' -and $exoBroker[0].CoreIsNull) { 'Observed' } else { 'Observed: differs' }) -Evidence $exoBrokerEvidence
+            }
+            else {
+                $rows += New-Claim -Claim 'EXO''s RuntimeBroker copy started: lazy Core created and live, no s_initException, so the runtime its P/Invokes reached accepted a second startup' -Status $(if (-not $init -and $exoBroker[0].LazyCoreValueCreated -and -not $exoBroker[0].CoreIsNull) { 'Observed' } else { 'Observed: differs' }) -Evidence $exoBrokerEvidence
+            }
         }
         else {
             $rows += New-Claim -Claim 'EXO''s RuntimeBroker copy: lazy Core null with s_initException ApiContractViolation' -Status 'Not captured' -Evidence 'BrokerRuntimeState absent from this JSON (child < 1.1).'
@@ -742,7 +751,16 @@ function New-Interpretation {
         if ($graphBroker.Count -gt 0) {
             $rows += New-Claim -Claim 'Graph''s RuntimeBroker copy in the same process has a live Core and no init exception' -Status $(if ($graphBroker[0].LazyCoreValueCreated -and -not $graphBroker[0].CoreIsNull -and -not $graphBroker[0].InitException) { 'Observed' } else { 'Observed: differs' }) -Evidence ('graph-connect-then-exo.json Steps[connect-exo].Snapshot.BrokerRuntimeState[Graph]: LazyCoreValueCreated={0}; CoreIsNull={1}; InitException={2}' -f $graphBroker[0].LazyCoreValueCreated, $graphBroker[0].CoreIsNull, $(if ($graphBroker[0].InitException) { $graphBroker[0].InitException.Type } else { 'null' }))
         }
-        $rows += New-Claim -Claim 'The NullReferenceException is the null-Core dereference in RuntimeBroker''s constructor (s_lazyCore.Value under PiiLoggingEnabled); a DLL load failure would surface as MsalClientException wam_runtime_init_failed instead' -Status 'Inferred' -Evidence 'Basis: MSAL 4.83.1 source (src/client/Microsoft.Identity.Client.Broker/RuntimeBroker.cs: the lazy factory catches only MsalRuntimeException with ApiContractViolation and returns null; every other exception is rethrown as wam_runtime_init_failed) plus the observed null Core. The release build carries no line numbers, so the exact statement is not in the stack.'
+        if ($connectFailed) {
+            $rows += New-Claim -Claim 'The NullReferenceException is the null-Core dereference in RuntimeBroker''s constructor (s_lazyCore.Value under PiiLoggingEnabled); a DLL load failure would surface as MsalClientException wam_runtime_init_failed instead' -Status 'Inferred' -Evidence 'Basis: MSAL 4.83.1 source (src/client/Microsoft.Identity.Client.Broker/RuntimeBroker.cs: the lazy factory catches only MsalRuntimeException with ApiContractViolation and returns null; every other exception is rethrown as wam_runtime_init_failed) plus the observed null Core. The release build carries no line numbers, so the exact statement is not in the stack.'
+        }
+        else {
+            # The native runtime has no file version resource, so the NativeInterop package version each module ships is the
+            # citable number; which of the two sides (the runtime or how MSAL starts it) changed behaviour is not traced here.
+            $interopRows = @(Get-KeyAssemblyRows -Snapshot $connectFinal -Names @('Microsoft.Identity.Client.NativeInterop') | Where-Object { $_.Owner })
+            $interopText = @($interopRows | ForEach-Object { '{0}={1} ({2})' -f $_.Owner, $_.Version, $_.Context }) -join ', '
+            $rows += New-Claim -Claim 'Why the second startup is accepted on this build: the runtime Graph maps comes from a newer NativeInterop package than the one EXO carries (and than the 0.19.4 both shipped when the failure was recorded); whether the change is in msalruntime itself or in how MSAL starts it was not traced' -Status 'Inferred' -Evidence ('graph-connect-then-exo.json Steps[connect-exo].Snapshot.Assemblies[Microsoft.Identity.Client.NativeInterop]: {0}; NativeModules FileVersion: {1}' -f $interopText, $(if (@($natives | Where-Object { $_.FileVersion }).Count -gt 0) { (@($natives | ForEach-Object { '{0}={1}' -f (Get-RowOwner -Row $_), $_.FileVersion }) -join ', ') } else { 'none (msalruntime.dll carries no version resource)' }))
+        }
     }
     $lines += New-ClaimTable -Rows $rows
 
@@ -763,6 +781,11 @@ function New-Interpretation {
             $lines += ''
             $lines += 'The "Error Acquiring Token" host text quoted in the issue thread did not appear in this transcript; the failure surfaced as a terminating error from Get-ConnectionContext wrapping the same NullReferenceException stack.'
         }
+    }
+    elseif (($importClass -in @('signed-in', 'cancelled', 'ok')) -and ($connectClass -in @('signed-in', 'cancelled'))) {
+        $successBare = Get-BareNameSummary -Snapshot $connectFinal
+        $successInterop = @(Get-KeyAssemblyRows -Snapshot $connectFinal -Names @('Microsoft.Identity.Client.NativeInterop') | Where-Object { $_.Owner })
+        $lines += ('No failure to explain on this build: Connect-ExchangeOnline signed in after a Graph WAM sign-in. The native picture is the one that failed on 2.40.0 ({0} msalruntime copies; bare name -> {1}; EXO''s P/Invokes bare-name; no resolver), so EXO''s second startup went against Graph''s mapped copy and was accepted. The difference is on the native side, in the runtime each module ships (NativeInterop {2}), not in managed resolution.' -f @($connectFinal.NativeModules).Count, $(if ($successBare.Owner) { $successBare.Owner } else { 'not captured' }), (@($successInterop | ForEach-Object { '{0} {1}' -f $_.Owner, $_.Version }) -join ' vs '))
     }
     else {
         $lines += ('Unexplained. connect-exo classes were {0} (import) and {1} (connect); this does not match either predicted pattern. See the raw step tables and exception details above.' -f $importClass, $connectClass)
@@ -976,7 +999,17 @@ function New-Interpretation {
     if ($isoAny) {
         $lines += ('Observed on {0}: Graph-then-EXO = {1}; EXO-then-Graph = {2}; Graph-import-then-EXO = {3}.' -f $isoLabel, $prConnectClass, $prReverseClass, $prImportClass)
         if ($prConnectClass -eq 'nre-runtimebroker') { $lines += 'The PR fixes EXO-then-Graph (if the row above shows a sign-in) and does not fix Graph-then-EXO. The fix for that direction has to come from MSAL''s NativeInterop (pin P/Invokes to the preloaded handle, or tolerate a second startup); -DisableWAM remains the workaround.' }
-        elseif ($prConnectClass -in @('signed-in', 'cancelled')) { $lines += 'Graph-then-EXO works on the isolated build, which refutes the prediction: pinning Graph''s copy was enough. Re-read the native rows above for why (most likely a second, unstarted mapping being the one EXO reached).' }
+        elseif ($prConnectClass -in @('signed-in', 'cancelled')) {
+            $isoFinal = Get-FinalSnapshot -Result $isoConnect
+            $isoBare = Get-BareNameSummary -Snapshot $isoFinal
+            $isoExoBroker = @(Get-Prop -Object $isoFinal -Name 'BrokerRuntimeState' | Where-Object { $_ -and (Get-RowOwner -Row $_) -eq 'EXO' })
+            if ($isoBare.Owner -eq 'Graph' -and $isoExoBroker.Count -gt 0 -and -not $isoExoBroker[0].InitException) {
+                $lines += 'Graph-then-EXO works on the isolated build, which refutes the prediction, though not because EXO reached a different copy: the bare name still resolves to Graph''s mapped msalruntime and EXO''s RuntimeBroker started cleanly against it, so the second startup was accepted rather than avoided. The isolation changed the managed side only; the native change is the runtime Graph ships (Finding 1, last row).'
+            }
+            else {
+                $lines += 'Graph-then-EXO works on the isolated build, which refutes the prediction: pinning Graph''s copy was enough. Re-read the native rows above for why (most likely a second, unstarted mapping being the one EXO reached).'
+            }
+        }
         if ($prReverseClass -in @('signed-in', 'cancelled')) { $lines += 'EXO-then-Graph reached a Graph sign-in: the WithLogging failure is gone, as predicted.' }
         elseif ($prReverseClass -eq 'withlogging-missingmethod') { $lines += 'EXO-then-Graph still fails on WithLogging: the isolation did not stop Graph binding to EXO''s MSAL; check the Microsoft.Identity.Client placement row in Finding 3.' }
         elseif ($isoReverse) { $lines += ('EXO-then-Graph failed with a different class ({0}): the exception detail is in the exo-then-graph section above, and its native rows show whether a second msalruntime startup is what failed.' -f $prReverseClass) }

@@ -61,7 +61,7 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
 $script:TrackedAssemblyPattern = '^(Microsoft\.Identity|Microsoft\.IdentityModel|Azure\.(Identity|Core)|Microsoft\.Graph|Microsoft\.Exchange|Microsoft\.Kiota|Microsoft\.Azure\.PowerShell\.Authentication|Microsoft\.PowerShell\.ThreadJob)'
-$script:ScriptVersion = '2.1'
+$script:ScriptVersion = '2.2'
 # Values that must never reach the JSON or the transcript; Protect-Text replaces them on every write.
 $script:Secrets = @()
 
@@ -517,6 +517,9 @@ function Protect-Text {
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
     $pairs = @(@($script:TenantId, '<tenant-id>'), @($script:UserPrincipalName, '<upn>'))
     foreach ($secret in $script:Secrets) { $pairs += , @($secret, '<token>') }
+    # Longest value first: when the tenant is given as a domain name it is a substring of the UPN, and replacing it
+    # first would leave the UPN's local part behind as "user@<tenant-id>".
+    $pairs = @($pairs | Sort-Object -Property { [string] $_[0] } -Descending | Sort-Object -Property { ([string] $_[0]).Length } -Descending -Stable)
     foreach ($pair in $pairs) {
         $value = $pair[0]
         if ([string]::IsNullOrWhiteSpace($value)) { continue }
