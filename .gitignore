@@ -1,5 +1,6 @@
-# scrubbed transcripts and JSON stay local
+# scrubbed transcripts and JSON stay local (results-<graph version>/ for re-runs on other Graph releases)
 results/
+results-*/
 # third-party sources fetched for reference
 reference/
 # sparse clone of msgraph-sdk-powershell and any build of it

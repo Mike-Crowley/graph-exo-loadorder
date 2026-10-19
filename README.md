@@ -14,7 +14,7 @@ and [PR #3789](https://github.com/microsoftgraph/msgraph-sdk-powershell/pull/378
 
 ## Warning: a person must be at the keyboard
 
-Every scenario except `probe-only` opens a Web Account Manager (WAM) picker or a browser sign-in, sometimes twice.
+Every scenario except `probe-only` and `imports-only` opens a Web Account Manager (WAM) picker or a browser sign-in, sometimes twice.
 The harness prints one line before each scenario saying what to do at the prompt (sign in, or cancel). The child
 process treats a cancelled prompt as an ordinary caught exception and still writes its snapshot; the harness waits
 for the child and never kills it. Do not run this unattended.
@@ -24,8 +24,8 @@ for the child and never kills it. Do not run this unattended.
 - PowerShell 7 (tested on 7.6.6, .NET 10.0.12, Windows 11 x64). `pwsh` must be on PATH; the harness starts the
   child windows with it.
 - `Microsoft.Graph.Authentication` 2.40.0 and `ExchangeOnlineManagement` 3.10.1 installed (exact versions; other
-  versions via `-GraphVersion` and `-ExoVersion`). The harness never installs, updates or removes modules; if a
-  version is missing it stops and says so.
+  versions via `-GraphVersion` and `-ExoVersion`; the 2.41.2 re-test below needs 2.41.2 installed). The harness
+  never installs, updates or removes modules; if a version is missing it stops and says so.
 - A tenant ID and an account that can sign in to Microsoft Graph and Exchange Online. Both values are passed to
   the child on its command line only; they are scrubbed from the JSON and the transcripts at write time and
   never appear in `report.md`.
@@ -46,6 +46,12 @@ for the child and never kills it. Do not run this unattended.
 
 # the PR build scenarios
 .\Test-GraphExoLoadOrder.ps1 -TenantId <tenant-guid> -UserPrincipalName <upn> -GraphModulePath .\prbuild\Microsoft.Graph.Authentication\Microsoft.Graph.Authentication.psd1 -Scenario pr-graph-connect-then-exo
+
+# a released Graph that contains PR #3789 (2.41.0 and later): own results folder and report, Finding 6 reads the standard scenarios
+.\Test-GraphExoLoadOrder.ps1 -TenantId <tenant-guid> -UserPrincipalName <upn> -GraphVersion 2.41.2 -ResultsPath .\results-2.41.2 -ReportPath .\report-2.41.2.md
+
+# dry run of the capture code on that version: no prompts, no identity needed
+.\Test-GraphExoLoadOrder.ps1 -GraphVersion 2.41.2 -ResultsPath .\results-2.41.2 -ReportPath .\report-2.41.2.md -Scenario probe-only, imports-only
 ```
 
 `probe-only` runs first and must pass: it checks that the capture code sees
@@ -60,8 +66,9 @@ Add `-Pause` to wait for Enter before each scenario window opens.
 | `Invoke-LoadOrderScenario.ps1` | Child: runs one scenario in the current process, snapshots after every step, rewrites its JSON after every step so a crash still leaves the last state on disk |
 | `scenarios.psd1` | Scenario definitions: steps, the instruction shown to the operator, the expectation, preconditions |
 | `Build-PrAuthenticationModule.ps1` | Builds the Graph module from the PR #3789 checkout under `src\` (needs a .NET SDK) |
-| `report.md`, `audit.md`, `build-notes.md` | Generated report; claim-by-claim evidence audit; what the PR build needs |
-| `results\` | `<scenario>.json` and `<scenario>.transcript.txt` (git-ignored) |
+| `report.md`, `audit.md`, `build-notes.md` | Generated report for the 2.40.0 run; claim-by-claim evidence audit; what the PR build needs |
+| `report-<version>.md` | The same report for a re-run under `-GraphVersion`, written via `-ReportPath` so `report.md` stays the 2.40.0 evidence |
+| `results\`, `results-<version>\` | `<scenario>.json` and `<scenario>.transcript.txt` (git-ignored), one folder per Graph version via `-ResultsPath` |
 | `reference\` | Fetched sources used for the interpretation: the PR diff, the pre-PR `ModuleInitializer.cs`, MSAL 4.83.1 `RuntimeBroker.cs` (git-ignored) |
 
 ## Scenarios and what each one discriminates
@@ -69,6 +76,7 @@ Add `-Pause` to wait for Enter before each scenario window opens.
 | Scenario | Steps | Discriminates |
 |---|---|---|
 | `probe-only` | baseline, import a trivial binary module | Validates the capture code; no sign-in |
+| `imports-only` | import Graph, import EXO | Where each identity stack lands before any sign-in; no sign-in (the dry-run scenario for a new Graph version) |
 | `exo-only` | import EXO, connect EXO | Baseline placement of EXO's identity stack and its `msalruntime` |
 | `graph-import-then-exo` | import Graph, import EXO, connect EXO | Whether a Graph import alone breaks EXO (managed resolution) or a Graph connection is needed (native) |
 | `graph-connect-then-exo` | import Graph, connect Graph, import EXO, connect EXO | The reported `RuntimeBroker` `NullReferenceException`, with native mappings, bare-name resolution, DllImport targets, resolver registrations and `RuntimeBroker` statics captured after the failure |
@@ -77,7 +85,34 @@ Add `-Pause` to wait for Enter before each scenario window opens.
 | `graph-accesstoken-then-exo` | connect Graph with `-AccessToken` (token fetched by the harness through Az.Accounts, browser sign-in), import EXO, connect EXO | Whether a Graph session that never starts msalruntime leaves EXO's WAM path working (a same-session workaround without `-DisableWAM`). The token travels in the child's environment block only and is scrubbed from everything the child writes |
 | `exo-then-graph` | import EXO, connect EXO, import Graph, connect Graph | The reverse failure (`WithLogging` `MissingMethodException`) and the split `IIdentityLogger` identity behind it |
 | `az-connect-then-exo` | connect Az (WAM), import EXO, connect EXO | Whether any WAM user, not just Graph, breaks EXO (only when Az uses WAM) |
-| `pr-graph-import-then-exo`, `pr-graph-connect-then-exo`, `pr-exo-then-graph` | as their released-module counterparts, Graph from `-GraphModulePath` | Whether PR #3789 changes either direction |
+| `pr-graph-import-then-exo`, `pr-graph-connect-then-exo`, `pr-exo-then-graph` | as their released-module counterparts, Graph from `-GraphModulePath` | Whether PR #3789 changes either direction. Redundant from 2.41.0, where the released module contains the PR: run the standard scenarios with `-GraphVersion 2.41.x` and the report treats them as the isolated build |
+
+## Re-testing on Microsoft.Graph.Authentication 2.41.x
+
+PR #3789 shipped in 2.41.0 (September 2026); 2.41.2 is current. What changed for this harness, verified against the
+installed 2.41.2 on 2026-10-19:
+
+- Graph's identity stack now loads into an `AssemblyLoadContext` named `Microsoft.Graph.Authentication`
+  (a `GraphAssemblyLoadContext` with `Load` and `LoadUnmanagedDll` overrides) instead of `msgraph-load-context`;
+  only `Microsoft.Graph.Authentication.Core` is bridged into Default. No Graph `AppDomain.AssemblyResolve` handler
+  is registered any more; the only handler after import is `System.Reflection.Assembly.LoadFromResolveHandler`.
+- Graph ships MSAL 4.90.0 and NativeInterop 0.20.6 (EXO 3.10.1 stays on 4.83.1 and 0.19.4). Both NativeInterop
+  copies still declare their runtime P/Invokes by bare name (67 against `msalruntime` on x64) and neither registers
+  a `DllImportResolver`, so the mechanism-B prediction stands as written.
+- MSAL 4.90.0's `RuntimeBroker` keeps the `s_lazyCore` and `s_initException` statics the snapshot reads.
+
+The capture code needed no change. The report generator reads the Graph context name from the snapshot, treats any
+run with `-GraphVersion` 2.41.0 or later as the isolated build in Finding 6 (the `pr-*` scenarios are then redundant),
+and states the two predictions from the 2026-09-25 comment on #3394 as claims to confirm or refute:
+
+| Prediction | Decided by | Confirmed by | Refuted by |
+|---|---|---|---|
+| Graph-then-EXO still fails: EXO's bare-name P/Invokes reach Graph's already-started `msalruntime` | `graph-connect-then-exo` | `nre-runtimebroker` | a sign-in |
+| EXO-then-Graph is fixed by construction: Graph no longer binds to EXO's MSAL | `exo-then-graph` | a Graph prompt or sign-in | `withlogging-missingmethod`; any other class is a new failure, read from the native rows (two `msalruntime` copies, each `RuntimeBroker`'s state) |
+
+Keep the 2.40.0 evidence intact by giving the re-run its own `-ResultsPath` and `-ReportPath`. To report back on
+#3394, quote from `report-2.41.2.md`: the Summary table, Finding 6, the EXO-then-Graph rows of Finding 3, and the
+Implication paragraph. Evidence paths in that report point at `results-2.41.2\<scenario>.json`.
 
 ## What a snapshot contains
 

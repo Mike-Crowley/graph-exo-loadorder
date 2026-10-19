@@ -7,29 +7,43 @@ Harness for the Graph-then-EXO load-order diagnostic.
 Checks prerequisites, then runs each scenario from scenarios.psd1 in its own fresh, visible
 "pwsh -NoProfile -NoLogo" window via Start-Process -Wait. A fresh process per scenario keeps assembly
 load contexts unpolluted; a visible window lets WAM prompts appear. The harness waits for the child and
-never kills it. Afterwards it builds report.md from the JSON files in the results folder.
+never kills it. Afterwards it builds the report (report.md unless -ReportPath says otherwise) from the JSON files
+in the results folder.
 
 Nothing here installs, updates, or removes modules, touches the profile, or changes system or Az settings.
 
 .PARAMETER TenantId
-Tenant for Connect-MgGraph and Connect-AzAccount. Required for every scenario except probe-only. Never written to report.md.
+Tenant for Connect-MgGraph and Connect-AzAccount. Required for every scenario except probe-only and imports-only. Never written to the report.
 
 .PARAMETER UserPrincipalName
-Account hint for Connect-ExchangeOnline. Required for every scenario except probe-only. Never written to report.md.
+Account hint for Connect-ExchangeOnline. Required for every scenario except probe-only and imports-only. Never written to the report.
 
 .PARAMETER Scenario
 Subset of scenarios to run, in the order defined by scenarios.psd1. Default: every scenario whose
 preconditions are met (pr-* need -GraphModulePath; az-connect-then-exo needs Az.Accounts with EnableLoginByWam = true).
 
+.PARAMETER GraphVersion
+Installed Microsoft.Graph.Authentication version to import (exact). 2.40.0 is the release the original report was
+written against; 2.41.0 and later contain PR #3789, and the report then treats the standard scenarios as the
+isolated-Graph run (Finding 6) without needing -GraphModulePath.
+
 .PARAMETER GraphModulePath
 Path to a Microsoft.Graph.Authentication.psd1 built from PR #3789. Enables the pr-* scenarios; the installed
--GraphVersion is still used by every other scenario.
+-GraphVersion is still used by every other scenario. Redundant once -GraphVersion is 2.41.0 or later.
+
+.PARAMETER ResultsPath
+Folder for <scenario>.json and the transcripts. Use one folder per Graph version (for example .\results-2.41.2)
+so the runs behind an earlier report are not overwritten.
+
+.PARAMETER ReportPath
+Where the Markdown report is written. Default: report.md beside this script. Pair it with -ResultsPath
+(for example .\report-2.41.2.md) to keep one report per Graph version.
 
 .PARAMETER ReportOnly
-Skip the runs and rebuild report.md from whatever JSON already exists.
+Skip the runs and rebuild the report from whatever JSON already exists under -ResultsPath.
 
 .PARAMETER SkipReport
-Run the scenarios but do not rebuild report.md (useful when running scenarios one at a time).
+Run the scenarios but do not rebuild the report (useful when running scenarios one at a time).
 
 .PARAMETER Pause
 Wait for Enter before launching each scenario.
@@ -42,6 +56,16 @@ Wait for Enter before launching each scenario.
 
 .EXAMPLE
 .\Test-GraphExoLoadOrder.ps1 -TenantId <guid> -UserPrincipalName <upn> -GraphModulePath .\prbuild\Microsoft.Graph.Authentication.psd1 -Scenario pr-graph-connect-then-exo
+
+.EXAMPLE
+.\Test-GraphExoLoadOrder.ps1 -GraphVersion 2.41.2 -ResultsPath .\results-2.41.2 -ReportPath .\report-2.41.2.md -Scenario probe-only, imports-only
+
+Dry run of the capture code on a released isolated Graph: no prompts, no identity needed.
+
+.EXAMPLE
+.\Test-GraphExoLoadOrder.ps1 -TenantId <guid> -UserPrincipalName <upn> -GraphVersion 2.41.2 -ResultsPath .\results-2.41.2 -ReportPath .\report-2.41.2.md
+
+The full re-test on Microsoft.Graph.Authentication 2.41.2, kept apart from the 2.40.0 results and report.
 #>
 [CmdletBinding()]
 param(
@@ -59,6 +83,8 @@ param(
 
     [string] $ResultsPath = (Join-Path $PSScriptRoot 'results'),
 
+    [string] $ReportPath = (Join-Path $PSScriptRoot 'report.md'),
+
     [switch] $ReportOnly,
 
     [switch] $SkipReport,
@@ -70,7 +96,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:ChildScript = Join-Path $PSScriptRoot 'Invoke-LoadOrderScenario.ps1'
 $script:Definitions = Import-PowerShellDataFile -Path (Join-Path $PSScriptRoot 'scenarios.psd1')
-$script:ReportPath = Join-Path $PSScriptRoot 'report.md'
+$script:ReportPath = $ReportPath
 $script:KeyAssemblies = @(
     'Microsoft.Identity.Client'
     'Microsoft.Identity.Client.Broker'
@@ -327,6 +353,35 @@ function Get-OutcomeClass {
     return 'other-exception'
 }
 
+function Test-IsolatedGraph {
+    # True when the Graph module in a run isolates its identity stack in its own AssemblyLoadContext: a source
+    # build of PR #3789 (GraphModulePath), or the released 2.41.0 and later, which contain that PR.
+    param($Result)
+    if (-not $Result) { return $false }
+    if (Get-Prop -Object $Result.Requested -Name 'GraphModulePath') { return $true }
+    $version = Get-Prop -Object $Result.Requested -Name 'GraphVersion'
+    if ([string]::IsNullOrWhiteSpace($version)) { return $false }
+    try { return ([version] $version -ge [version] '2.41.0') } catch { return $false }
+}
+
+function Get-GraphContextName {
+    # The context Graph's own identity assemblies landed in, read from the snapshot rather than assumed:
+    # msgraph-load-context up to 2.40.0, Microsoft.Graph.Authentication (GraphAssemblyLoadContext) from 2.41.0.
+    param($Snapshot)
+    $rows = @(Get-KeyAssemblyRows -Snapshot $Snapshot -Names @('Microsoft.Graph.Authentication.Core', 'Microsoft.Identity.Client', 'Azure.Identity') | Where-Object { $_.Owner -eq 'Graph' -and $_.Context -notin @('Default', '(not loaded)') })
+    if ($rows.Count -gt 0) { return $rows[0].Context }
+    return 'msgraph-load-context'
+}
+
+function Format-BrokerState {
+    # "created=True, null=False, init=none" for one owner's first RuntimeBroker row; used by the isolated-Graph claims.
+    param($Rows)
+    if (@($Rows).Count -eq 0) { return 'no Broker copy' }
+    $row = @($Rows)[0]
+    $init = if ($row.InitException) { '{0} "{1}"' -f $row.InitException.Properties.Status, $row.InitException.Properties.Context } else { 'none' }
+    return ('created={0}, null={1}, init={2}' -f $row.LazyCoreValueCreated, $row.CoreIsNull, $init)
+}
+
 function Get-StepEvidence {
     param([string] $ScenarioName, $Step)
     if (-not $Step) { return ('{0}.json: step not recorded' -f $ScenarioName) }
@@ -405,7 +460,10 @@ function New-ScenarioSection {
     $lines += ('## {0}' -f $Name)
     $lines += ''
     if ($definition) {
-        $lines += ('Steps: {0}. Instruction given: {1}' -f ($definition.Steps -join ' -> '), $definition.Instruction)
+        # The child records the instruction it showed; prefer that over the current scenarios.psd1 text so a report
+        # regenerated after the definitions change still says what the operator was told at the time.
+        $instructionGiven = if ($Result -and (Get-Prop -Object $Result -Name 'Instruction')) { $Result.Instruction } else { $definition.Instruction }
+        $lines += ('Steps: {0}. Instruction given: {1}' -f ($definition.Steps -join ' -> '), $instructionGiven)
         $lines += ''
     }
     if (-not $Result) {
@@ -692,13 +750,14 @@ function New-Interpretation {
         $lines += 'The NRE appears with Graph merely imported, so a completed Graph WAM sign-in is not a precondition.'
         $brokerRows = @(Get-KeyAssemblyRows -Snapshot $importFinal -Names @('Microsoft.Identity.Client.Broker', 'Microsoft.Identity.Client.NativeInterop'))
         foreach ($r in $brokerRows) { $lines += ('- {0}: context {1}, owner {2}, location {3}' -f $r.Name, $r.Context, $r.Owner, (Get-ShortLocation -Location $r.Location)) }
-        $inGraphContext = @($brokerRows | Where-Object { $_.Context -eq 'msgraph-load-context' -and $_.Owner -eq 'Graph' })
+        $graphContextImport = Get-GraphContextName -Snapshot $importFinal
+        $inGraphContext = @($brokerRows | Where-Object { $_.Context -eq $graphContextImport -and $_.Owner -eq 'Graph' })
         $lines += ''
-        if ($inGraphContext.Count -gt 0) { $lines += 'Mechanism A (managed resolution). EXO''s broker assemblies were served by Graph''s AssemblyResolve handler into msgraph-load-context from Graph''s Dependencies folder, splitting type identity. PR #3789 removes that handler on PS7, so it removes this path.' }
-        else { $lines += 'Unexplained. The NRE occurs without a Graph connection, but EXO''s Broker/NativeInterop are not in msgraph-load-context from Graph''s folder, so mechanism A as stated does not describe it. Raw evidence above.' }
+        if ($inGraphContext.Count -gt 0) { $lines += ('Mechanism A (managed resolution). EXO''s broker assemblies were served by Graph''s AssemblyResolve handler into {0} from Graph''s Dependencies folder, splitting type identity. PR #3789 removes that handler on PS7, so it removes this path.' -f $graphContextImport) }
+        else { $lines += ('Unexplained. The NRE occurs without a Graph connection, but EXO''s Broker/NativeInterop are not in {0} from Graph''s folder, so mechanism A as stated does not describe it. Raw evidence above.' -f $graphContextImport) }
     }
     elseif (($importClass -in @('signed-in', 'cancelled', 'ok')) -and $connectClass -eq 'nre-runtimebroker') {
-        $lines += 'Mechanism B (native, process-level). graph-import-then-exo reached a sign-in while graph-connect-then-exo threw the NRE, so Graph''s native runtime being started first is the precondition. Both modules hold a private managed MSAL stack (Graph in msgraph-load-context, EXO in Default); the collision is in the one msalruntime.dll a bare-name P/Invoke can reach. The native runtime loaded fine and rejected EXO''s second startup as a contract violation.'
+        $lines += ('Mechanism B (native, process-level). graph-import-then-exo reached a sign-in while graph-connect-then-exo threw the NRE, so Graph''s native runtime being started first is the precondition. Both modules hold a private managed MSAL stack (Graph in {0}, EXO in Default); the collision is in the one msalruntime.dll a bare-name P/Invoke can reach. The native runtime loaded fine and rejected EXO''s second startup as a contract violation.' -f (Get-GraphContextName -Snapshot $connectFinal))
         $transcript = $connectThenExo.TranscriptPath
         if ($transcript -and (Test-Path -LiteralPath $transcript) -and -not (Select-String -LiteralPath $transcript -Pattern 'Acquiring Token' -Quiet)) {
             $lines += ''
@@ -727,7 +786,12 @@ function New-Interpretation {
         for ($i = 0; $i -lt $handlers.Count; $i++) { if ($handlers[$i] -match 'Microsoft\.Graph\.PowerShell\.Authentication') { $graphIndex = $i; break } }
         $graphCount = @($handlers | Where-Object { $_ -match 'Microsoft\.Graph\.PowerShell\.Authentication' }).Count
         $rows += New-Claim -Claim 'LoadFromResolveHandler is registered at baseline, before any module import' -Status $(if ($baselineHandlers -contains $script:LoadFromHandler) { 'Observed' } else { 'Observed: contradicted' }) -Evidence ('{0}.json Steps[baseline].Snapshot.AssemblyResolveHandlers.Handlers: {1}' -f $orderName, $(if ($baselineHandlers.Count -gt 0) { ($baselineHandlers -join ' -> ') } else { '(none)' }))
-        $rows += New-Claim -Claim ('Graph''s ModuleInitializer.ResolvingHandler is appended after it ({0} registrations, one per import of the cmdlet assembly)' -f $graphCount) -Status $(if ($graphIndex -gt $loadFromIndex -and $loadFromIndex -ge 0) { 'Observed' } elseif ($graphIndex -lt 0) { 'Observed: no Graph handler' } else { 'Observed: contradicted' }) -Evidence ('{0}.json Steps[import-graph].Snapshot.AssemblyResolveHandlers.Handlers: {1}' -f $orderName, ($handlers -join ' -> '))
+        if (Test-IsolatedGraph -Result $orderSource) {
+            $rows += New-Claim -Claim 'No Graph AssemblyResolve handler is registered: from 2.41.0 Graph resolves its dependencies inside GraphAssemblyLoadContext instead of hooking AppDomain.AssemblyResolve' -Status $(if ($graphIndex -lt 0) { 'Observed' } else { 'Observed: contradicted' }) -Evidence ('{0}.json Steps[import-graph].Snapshot.AssemblyResolveHandlers.Handlers: {1}' -f $orderName, ($handlers -join ' -> '))
+        }
+        else {
+            $rows += New-Claim -Claim ('Graph''s ModuleInitializer.ResolvingHandler is appended after it ({0} registrations, one per import of the cmdlet assembly)' -f $graphCount) -Status $(if ($graphIndex -gt $loadFromIndex -and $loadFromIndex -ge 0) { 'Observed' } elseif ($graphIndex -lt 0) { 'Observed: no Graph handler' } else { 'Observed: contradicted' }) -Evidence ('{0}.json Steps[import-graph].Snapshot.AssemblyResolveHandlers.Handlers: {1}' -f $orderName, ($handlers -join ' -> '))
+        }
         $rows += New-Claim -Claim 'The runtime invokes AssemblyResolve handlers in registration order and stops at the first non-null result' -Status 'Inferred' -Evidence 'Basis: .NET runtime source, System.Runtime.Loader.AssemblyLoadContext.InvokeResolveEvent (foreach over Delegate.EnumerateInvocationList, return first non-null). Documented behavior, not observed in this process.'
         $placements = @()
         foreach ($name in @('exo-only', 'graph-import-then-exo', 'graph-connect-then-exo', 'graph-connect-then-exo-disablewam', 'exo-then-graph')) {
@@ -766,9 +830,24 @@ function New-Interpretation {
         $reverseClass = Get-OutcomeClass -Step $reverseStep
         $abstractions = @(Get-KeyAssemblyRows -Snapshot $reverseFinal -Names @('Microsoft.IdentityModel.Abstractions'))
         $msal = @(Get-KeyAssemblyRows -Snapshot $reverseFinal -Names @('Microsoft.Identity.Client'))
-        $rows += New-Claim -Claim 'EXO first, then Connect-MgGraph fails with MissingMethodException on BaseAbstractApplicationBuilder.WithLogging(IIdentityLogger, Boolean)' -Status $(if ($reverseClass -eq 'withlogging-missingmethod') { 'Observed' } else { 'Observed: differs' }) -Evidence (Get-StepEvidence -ScenarioName 'exo-then-graph' -Step $reverseStep)
-        $rows += New-Claim -Claim 'In that process Microsoft.IdentityModel.Abstractions is loaded twice (EXO''s in Default, Graph''s in msgraph-load-context) while Microsoft.Identity.Client is EXO''s copy in Default only' -Status $(if (($abstractions | Where-Object { $_.Duplicate }).Count -gt 0 -and $msal.Count -eq 1 -and $msal[0].Context -eq 'Default' -and $msal[0].Owner -eq 'EXO') { 'Observed' } else { 'Observed: differs' }) -Evidence ('exo-then-graph.json Steps[connect-graph].Snapshot.Assemblies: {0}' -f (@(($abstractions + $msal) | ForEach-Object { '{0} {1} in {2} ({3})' -f $_.Name, $_.Version, $_.Context, $_.Owner }) -join '; '))
-        $rows += New-Claim -Claim 'The MissingMethodException is the split IIdentityLogger identity: Graph''s Azure.Identity binds to EXO''s MSAL in Default, whose WithLogging is typed to Default''s Abstractions, while Azure.Identity passes the IIdentityLogger from Graph''s context' -Status 'Inferred' -Evidence 'Basis: the placement row above plus the method signature in the error text. Type identity per context was not dumped.'
+        $placementText = @(($abstractions + $msal) | ForEach-Object { '{0} {1} in {2} ({3})' -f $_.Name, $_.Version, $_.Context, $_.Owner }) -join '; '
+        if (Test-IsolatedGraph -Result $exoThenGraph) {
+            # Isolated Graph (2.41+ or a PR build): the 2026-09-25 prediction was that this direction is fixed by
+            # construction, so the rows state the prediction and what the snapshot shows about the native side.
+            $graphContext = Get-GraphContextName -Snapshot $reverseFinal
+            $reverseStatus = switch ($reverseClass) { 'signed-in' { 'Prediction: confirmed' } 'cancelled' { 'Prediction: confirmed' } 'withlogging-missingmethod' { 'Prediction: refuted' } default { 'Observed: differs (class {0})' -f $reverseClass } }
+            $rows += New-Claim -Claim 'Prediction made before any isolated build ran: EXO first, then Connect-MgGraph no longer fails on WithLogging and reaches a Graph prompt, because Graph''s Azure.Identity can no longer bind to EXO''s MSAL in Default' -Status $reverseStatus -Evidence (Get-StepEvidence -ScenarioName 'exo-then-graph' -Step $reverseStep)
+            $graphMsal = @($msal | Where-Object { $_.Owner -eq 'Graph' -and $_.Context -eq $graphContext })
+            $exoMsal = @($msal | Where-Object { $_.Owner -eq 'EXO' -and $_.Context -eq 'Default' })
+            $rows += New-Claim -Claim ('Microsoft.Identity.Client is loaded twice in that process: EXO''s in Default and Graph''s in {0}' -f $graphContext) -Status $(if ($graphMsal.Count -eq 1 -and $exoMsal.Count -eq 1) { 'Observed' } else { 'Observed: differs' }) -Evidence ('exo-then-graph.json Steps[connect-graph].Snapshot.Assemblies: {0}' -f $placementText)
+            $reverseBrokers = @(Get-Prop -Object $reverseFinal -Name 'BrokerRuntimeState' | Where-Object { $_ })
+            $rows += New-Claim -Claim 'EXO then Graph on the native side: msalruntime copies mapped, bare-name resolution, and each RuntimeBroker''s startup state (a live Graph Core beside a live EXO Core means the already-started state is per mapped module; a Graph init exception means it is process-global)' -Status 'Observed' -Evidence ('exo-then-graph.json final snapshot: NativeModules {0}; {1}; Graph broker: {2}; EXO broker: {3}' -f (Get-NativeSummary -Snapshot $reverseFinal), (Get-BareNameSummary -Snapshot $reverseFinal).Text, (Format-BrokerState -Rows @($reverseBrokers | Where-Object { (Get-RowOwner -Row $_) -eq 'Graph' })), (Format-BrokerState -Rows @($reverseBrokers | Where-Object { (Get-RowOwner -Row $_) -eq 'EXO' })))
+        }
+        else {
+            $rows += New-Claim -Claim 'EXO first, then Connect-MgGraph fails with MissingMethodException on BaseAbstractApplicationBuilder.WithLogging(IIdentityLogger, Boolean)' -Status $(if ($reverseClass -eq 'withlogging-missingmethod') { 'Observed' } else { 'Observed: differs' }) -Evidence (Get-StepEvidence -ScenarioName 'exo-then-graph' -Step $reverseStep)
+            $rows += New-Claim -Claim 'In that process Microsoft.IdentityModel.Abstractions is loaded twice (EXO''s in Default, Graph''s in msgraph-load-context) while Microsoft.Identity.Client is EXO''s copy in Default only' -Status $(if (($abstractions | Where-Object { $_.Duplicate }).Count -gt 0 -and $msal.Count -eq 1 -and $msal[0].Context -eq 'Default' -and $msal[0].Owner -eq 'EXO') { 'Observed' } else { 'Observed: differs' }) -Evidence ('exo-then-graph.json Steps[connect-graph].Snapshot.Assemblies: {0}' -f $placementText)
+            $rows += New-Claim -Claim 'The MissingMethodException is the split IIdentityLogger identity: Graph''s Azure.Identity binds to EXO''s MSAL in Default, whose WithLogging is typed to Default''s Abstractions, while Azure.Identity passes the IIdentityLogger from Graph''s context' -Status 'Inferred' -Evidence 'Basis: the placement row above plus the method signature in the error text. Type identity per context was not dumped.'
+        }
     }
     else { $rows += New-Claim -Claim 'EXO-then-Graph behaviour' -Status 'Not run' -Evidence '' }
     $lines += New-ClaimTable -Rows $rows
@@ -836,19 +915,39 @@ function New-Interpretation {
     $lines += New-ClaimTable -Rows $rows
 
     # ---------- Finding 6 ----------
-    $lines += '### Finding 6: PR #3789 build'
-    $lines += ''
-    $rows = @()
+    # The isolated build is either a source build of PR #3789 (pr-* scenarios, -GraphModulePath) or, from 2.41.0,
+    # the released module itself, in which case the standard scenarios are the evidence.
     $prConnect = $Results['pr-graph-connect-then-exo']
     $prReverse = $Results['pr-exo-then-graph']
     $prImport = $Results['pr-graph-import-then-exo']
     $prAny = $prConnect -or $prReverse -or $prImport
-    $prConnectClass = Get-OutcomeClass -Step (Get-StepRecord -Result $prConnect -Name 'connect-exo')
-    $prReverseClass = Get-OutcomeClass -Step (Get-StepRecord -Result $prReverse -Name 'connect-graph')
-    $prImportClass = Get-OutcomeClass -Step (Get-StepRecord -Result $prImport -Name 'connect-exo')
-    $rows += New-Claim -Claim 'Prediction made before the PR build ran: Graph-then-EXO still fails after the PR, because the PR pins Graph''s P/Invokes to Graph''s copy (LoadUnmanagedDll override) while EXO''s stay bare-name in Default' -Status $(if ($prConnect) { $(if ($prConnectClass -eq 'nre-runtimebroker') { 'Prediction: confirmed' } else { 'Prediction: refuted' }) } else { 'Prediction' }) -Evidence $(if ($prConnect) { Get-StepEvidence -ScenarioName 'pr-graph-connect-then-exo' -Step (Get-StepRecord -Result $prConnect -Name 'connect-exo') } else { 'Not yet tested; see build-notes.md.' })
-    if ($prAny) {
-        foreach ($pair in @(@('pr-graph-import-then-exo', $prImport, 'connect-exo'), @('pr-graph-connect-then-exo', $prConnect, 'connect-exo'), @('pr-exo-then-graph', $prReverse, 'connect-graph'))) {
+    $released = @($Results.Values | Where-Object { $_ -and -not (Get-Prop -Object $_.Requested -Name 'GraphModulePath') -and (Test-IsolatedGraph -Result $_) })
+    if (-not $prAny -and $released.Count -gt 0) {
+        $isoLabel = 'Microsoft.Graph.Authentication {0} (released build containing PR #3789)' -f $released[0].Requested.GraphVersion
+        $isoConnect = $connectThenExo
+        $isoReverse = $exoThenGraph
+        $isoImport = $importThenExo
+        $trio = @(@('graph-import-then-exo', $isoImport, 'connect-exo'), @('graph-connect-then-exo', $isoConnect, 'connect-exo'), @('exo-then-graph', $isoReverse, 'connect-graph'))
+    }
+    else {
+        $isoLabel = 'PR #3789 build'
+        $isoConnect = $prConnect
+        $isoReverse = $prReverse
+        $isoImport = $prImport
+        $trio = @(@('pr-graph-import-then-exo', $isoImport, 'connect-exo'), @('pr-graph-connect-then-exo', $isoConnect, 'connect-exo'), @('pr-exo-then-graph', $isoReverse, 'connect-graph'))
+    }
+    $isoAny = $isoConnect -or $isoReverse -or $isoImport
+    $lines += ('### Finding 6: {0}' -f $isoLabel)
+    $lines += ''
+    $rows = @()
+    $prConnectClass = Get-OutcomeClass -Step (Get-StepRecord -Result $isoConnect -Name 'connect-exo')
+    $prReverseClass = Get-OutcomeClass -Step (Get-StepRecord -Result $isoReverse -Name 'connect-graph')
+    $prImportClass = Get-OutcomeClass -Step (Get-StepRecord -Result $isoImport -Name 'connect-exo')
+    $notRunText = if ($released.Count -gt 0) { 'Not run on this Graph version yet.' } else { 'Not yet tested; see build-notes.md.' }
+    $rows += New-Claim -Claim 'Prediction made before the PR build ran: Graph-then-EXO still fails after the PR, because the PR pins Graph''s P/Invokes to Graph''s copy (LoadUnmanagedDll override) while EXO''s stay bare-name in Default' -Status $(if ($isoConnect) { $(if ($prConnectClass -eq 'nre-runtimebroker') { 'Prediction: confirmed' } else { 'Prediction: refuted' }) } else { 'Prediction' }) -Evidence $(if ($isoConnect) { Get-StepEvidence -ScenarioName $trio[1][0] -Step (Get-StepRecord -Result $isoConnect -Name 'connect-exo') } else { $notRunText })
+    if ($isoAny) {
+        $rows += New-Claim -Claim 'Prediction made before the PR build ran: EXO-then-Graph is fixed by construction, because Graph''s Azure.Identity can no longer bind to EXO''s MSAL in Default' -Status $(if ($isoReverse) { $(if ($prReverseClass -in @('signed-in', 'cancelled')) { 'Prediction: confirmed' } elseif ($prReverseClass -eq 'withlogging-missingmethod') { 'Prediction: refuted' } else { 'Observed: differs (class {0})' -f $prReverseClass }) } else { 'Prediction' }) -Evidence $(if ($isoReverse) { Get-StepEvidence -ScenarioName $trio[2][0] -Step (Get-StepRecord -Result $isoReverse -Name 'connect-graph') } else { 'Not run' })
+        foreach ($pair in $trio) {
             $name = $pair[0]
             $r = $pair[1]
             if (-not $r) { $rows += New-Claim -Claim $name -Status 'Not run' -Evidence ''; continue }
@@ -863,6 +962,9 @@ function New-Interpretation {
             $rows += New-Claim -Claim ('{0}: RuntimeBroker statics' -f $name) -Status 'Observed' -Evidence ('{0}.json final snapshot: Graph {1}; EXO {2}' -f $name, $(if ($graphBrokerState.Count -gt 0) { 'created=' + $graphBrokerState[0].LazyCoreValueCreated + ', null=' + $graphBrokerState[0].CoreIsNull + ', init=' + $(if ($graphBrokerState[0].InitException) { $graphBrokerState[0].InitException.Properties.Status } else { 'none' }) } else { 'no Broker copy' }), $(if ($exoBrokerState.Count -gt 0) { 'created=' + $exoBrokerState[0].LazyCoreValueCreated + ', null=' + $exoBrokerState[0].CoreIsNull + ', init=' + $(if ($exoBrokerState[0].InitException) { $exoBrokerState[0].InitException.Properties.Status + ' "' + $exoBrokerState[0].InitException.Properties.Context + '"' } else { 'none' }) } else { 'no Broker copy' }))
         }
     }
+    elseif ($released.Count -gt 0) {
+        $rows += New-Claim -Claim 'graph-import-then-exo, graph-connect-then-exo, exo-then-graph' -Status 'Not run' -Evidence $notRunText
+    }
     else {
         $rows += New-Claim -Claim 'pr-graph-import-then-exo, pr-graph-connect-then-exo, pr-exo-then-graph' -Status 'Not run' -Evidence 'No build of the PR was available (no .NET SDK on this machine and no downloadable CI artifact; see build-notes.md).'
     }
@@ -871,10 +973,13 @@ function New-Interpretation {
     # ---------- Implication ----------
     $lines += '### Implication for PR #3789'
     $lines += ''
-    if ($prAny) {
-        $lines += ('Observed on the PR build: Graph-then-EXO = {0}; EXO-then-Graph = {1}; Graph-import-then-EXO = {2}.' -f $prConnectClass, $prReverseClass, $prImportClass)
+    if ($isoAny) {
+        $lines += ('Observed on {0}: Graph-then-EXO = {1}; EXO-then-Graph = {2}; Graph-import-then-EXO = {3}.' -f $isoLabel, $prConnectClass, $prReverseClass, $prImportClass)
         if ($prConnectClass -eq 'nre-runtimebroker') { $lines += 'The PR fixes EXO-then-Graph (if the row above shows a sign-in) and does not fix Graph-then-EXO. The fix for that direction has to come from MSAL''s NativeInterop (pin P/Invokes to the preloaded handle, or tolerate a second startup); -DisableWAM remains the workaround.' }
-        elseif ($prConnectClass -in @('signed-in', 'cancelled')) { $lines += 'Graph-then-EXO works on the PR build, which refutes the prediction: pinning Graph''s copy was enough. Re-read the native rows above for why (most likely a second, unstarted mapping being the one EXO reached).' }
+        elseif ($prConnectClass -in @('signed-in', 'cancelled')) { $lines += 'Graph-then-EXO works on the isolated build, which refutes the prediction: pinning Graph''s copy was enough. Re-read the native rows above for why (most likely a second, unstarted mapping being the one EXO reached).' }
+        if ($prReverseClass -in @('signed-in', 'cancelled')) { $lines += 'EXO-then-Graph reached a Graph sign-in: the WithLogging failure is gone, as predicted.' }
+        elseif ($prReverseClass -eq 'withlogging-missingmethod') { $lines += 'EXO-then-Graph still fails on WithLogging: the isolation did not stop Graph binding to EXO''s MSAL; check the Microsoft.Identity.Client placement row in Finding 3.' }
+        elseif ($isoReverse) { $lines += ('EXO-then-Graph failed with a different class ({0}): the exception detail is in the exo-then-graph section above, and its native rows show whether a second msalruntime startup is what failed.' -f $prReverseClass) }
     }
     elseif ($importClass -eq 'nre-runtimebroker') {
         $lines += 'If Finding 1 landed on mechanism A, the PR''s removal of the AppDomain.AssemblyResolve handler on PS7 addresses Graph-then-EXO as well as EXO-then-Graph.'
@@ -1001,9 +1106,9 @@ foreach ($name in $script:Definitions.Order) {
 }
 if ($selected.Count -eq 0) { throw 'No scenario selected.' }
 
-$needsIdentity = @($selected | Where-Object { $_ -ne 'probe-only' }).Count -gt 0
+$needsIdentity = @($selected | Where-Object { $_ -notin @('probe-only', 'imports-only') }).Count -gt 0
 if ($needsIdentity -and ([string]::IsNullOrWhiteSpace($TenantId) -or [string]::IsNullOrWhiteSpace($UserPrincipalName))) {
-    throw 'TenantId and UserPrincipalName are required for every scenario except probe-only.'
+    throw 'TenantId and UserPrincipalName are required for every scenario except probe-only and imports-only.'
 }
 $needsPrBuild = @($selected | Where-Object { $script:Definitions.Scenarios[$_].UsesPrBuild }).Count -gt 0
 
