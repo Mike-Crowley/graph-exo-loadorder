@@ -33,6 +33,9 @@ for the child and never kills it. Do not run this unattended.
   `az-connect-then-exo`. The harness reads that setting and never changes it.
 - Optional: a build of PR #3789 for the `pr-*` scenarios (`-GraphModulePath`). See `build-notes.md` and
   `Build-PrAuthenticationModule.ps1`; the build needs a .NET SDK 8.0 or later.
+- Optional: an ExchangeOnlineManagement copy that is not installed (a `Save-PSResource` of a preview, for example),
+  given as its manifest with `-ExoModulePath`. The child imports it by path, `-ExoVersion` is read from the manifest,
+  and the installed-module check is skipped. Keep the copy on a short path; the module's own loader dislikes long ones.
 
 ## How to run
 
@@ -49,6 +52,9 @@ for the child and never kills it. Do not run this unattended.
 
 # a released Graph that contains PR #3789 (2.41.0 and later): own results folder and report, Finding 6 reads the standard scenarios
 .\Test-GraphExoLoadOrder.ps1 -TenantId <tenant-guid> -UserPrincipalName <upn> -GraphVersion 2.41.2 -ResultsPath .\results-2.41.2 -ReportPath .\report-2.41.2.md
+
+# a saved, uninstalled EXO copy (here the 3.11.1 preview) against the installed 2.41.2
+.\Test-GraphExoLoadOrder.ps1 -TenantId <tenant-guid> -UserPrincipalName <upn> -GraphVersion 2.41.2 -ExoModulePath $env:LOCALAPPDATA\Temp\exo-preview\3.11.1\ExchangeOnlineManagement.psd1 -Scenario graph-connect-then-exo, exo-then-graph -ResultsPath .\results-exo-3.11.1p1 -ReportPath .\report-exo-3.11.1-preview1.md
 
 # dry run of the capture code on that version: no prompts, no identity needed
 .\Test-GraphExoLoadOrder.ps1 -GraphVersion 2.41.2 -ResultsPath .\results-2.41.2 -ReportPath .\report-2.41.2.md -Scenario probe-only, imports-only
@@ -118,6 +124,15 @@ startup is simply accepted now. The one number that moved on the native side is 
 version resource, and the harness does not trace whether the runtime or MSAL's startup call changed. EXO's bare-name
 binding therefore still decides which runtime EXO runs on when Graph connected first; today that copy happens to be
 newer than EXO's own.
+
+Result of the 2026-10-22 run (`report-exo-3.11.1-preview1.md`; PowerShell 7.6.7, Graph 2.41.2, ExchangeOnlineManagement
+3.11.1-Preview1 imported by path): the preview ships MSAL 4.90.0, Broker 4.85.2, NativeInterop 0.20.6 and a
+`msalruntime.dll` byte-identical to Graph 2.41.2's (its release notes mention none of this). Both orders connected,
+two runtimes mapped, both `RuntimeBroker` copies live. The preview's P/Invokes are still bare-name with no resolver, so
+the binding is unchanged; with Graph 2.40.0 imported by path first (`pr-graph-connect-then-exo` with the saved 2.40.0
+manifest as `-GraphModulePath`), the preview still fails with the `RuntimeBroker` `NullReferenceException` and
+"Authenticator Factory has already been started". The rejection therefore belongs to the 0.19.4 runtime that was
+mapped first, not to the interop version of the second module.
 
 Keep the 2.40.0 evidence intact by giving the re-run its own `-ResultsPath` and `-ReportPath`. To report back on
 #3394, quote from `report-2.41.2.md`: the Summary table, Finding 6, the EXO-then-Graph rows of Finding 3, and the

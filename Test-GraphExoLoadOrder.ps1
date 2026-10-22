@@ -81,6 +81,10 @@ param(
 
     [string] $GraphModulePath,
 
+    # ExchangeOnlineManagement manifest imported by path, for a copy that is not installed (a Gallery save of a
+    # preview, for example). When set, -ExoVersion is read from that manifest and the installed-module check is skipped.
+    [string] $ExoModulePath,
+
     # Microsoft.Online.SharePoint.PowerShell manifest (imported by path) and tenant admin URL; enable the spo-* scenarios.
     [string] $SpoModulePath,
 
@@ -122,12 +126,21 @@ function Test-Prerequisite {
     $pwshVersion = & $pwsh.Source -NoProfile -NoLogo -Command '$PSVersionTable.PSVersion.ToString()'
 
     $graph = Get-Module -ListAvailable -Name 'Microsoft.Graph.Authentication' | Where-Object { $_.Version -eq [version] $GraphVersion } | Select-Object -First 1
-    $exo = Get-Module -ListAvailable -Name 'ExchangeOnlineManagement' | Where-Object { $_.Version -eq [version] $ExoVersion } | Select-Object -First 1
+    $exo = $null
+    if ($ExoModulePath) {
+        if (-not (Test-Path -LiteralPath $ExoModulePath)) { throw ('ExoModulePath not found: {0}' -f $ExoModulePath) }
+        $exo = Get-Module -ListAvailable -Name $ExoModulePath | Select-Object -First 1
+        # The copy under test decides the version label; Get-Module reads the manifest without importing anything.
+        $script:ExoVersion = $ExoVersion = $exo.Version.ToString()
+    }
+    else {
+        $exo = Get-Module -ListAvailable -Name 'ExchangeOnlineManagement' | Where-Object { $_.Version -eq [version] $ExoVersion } | Select-Object -First 1
+    }
 
     Write-Host 'Prerequisites' -ForegroundColor Cyan
     Write-Host ('  pwsh {0} at {1}' -f $pwshVersion, $pwsh.Source)
     Write-Host ('  Microsoft.Graph.Authentication {0}: {1}' -f $GraphVersion, $(if ($graph) { $graph.Path } else { 'NOT INSTALLED' }))
-    Write-Host ('  ExchangeOnlineManagement {0}: {1}' -f $ExoVersion, $(if ($exo) { $exo.Path } else { 'NOT INSTALLED' }))
+    Write-Host ('  ExchangeOnlineManagement {0}: {1}{2}' -f $ExoVersion, $(if ($exo) { $exo.Path } else { 'NOT INSTALLED' }), $(if ($ExoModulePath) { ' (imported by path)' } else { '' }))
 
     if (-not $graph) { throw ('Microsoft.Graph.Authentication {0} is not installed. Install it yourself first; this harness never installs modules.' -f $GraphVersion) }
     if (-not $exo) { throw ('ExchangeOnlineManagement {0} is not installed. Install it yourself first; this harness never installs modules.' -f $ExoVersion) }
@@ -221,6 +234,7 @@ function Invoke-Scenario {
     if ($TenantId) { $arguments += @('-TenantId', (Format-ProcessArgument -Value $TenantId)) }
     if ($UserPrincipalName) { $arguments += @('-UserPrincipalName', (Format-ProcessArgument -Value $UserPrincipalName)) }
     if ($definition.UsesPrBuild) { $arguments += @('-GraphModulePath', (Format-ProcessArgument -Value $GraphModulePath)) }
+    if ($ExoModulePath) { $arguments += @('-ExoModulePath', (Format-ProcessArgument -Value $ExoModulePath)) }
     if ($definition.UsesSpo) { $arguments += @('-SpoModulePath', (Format-ProcessArgument -Value $SpoModulePath), '-SpoAdminUrl', (Format-ProcessArgument -Value $SpoAdminUrl)) }
 
     $params = @{

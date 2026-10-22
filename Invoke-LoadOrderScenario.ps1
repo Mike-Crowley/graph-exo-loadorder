@@ -48,6 +48,9 @@ param(
 
     [string] $GraphModulePath,
 
+    # ExchangeOnlineManagement manifest imported by path (a Gallery save that is not installed); overrides -ExoVersion.
+    [string] $ExoModulePath,
+
     # Microsoft.Online.SharePoint.PowerShell manifest, imported by path (the copy under test may be patched), and
     # the tenant admin URL for Connect-SPOService. Both only matter to the spo-* scenarios.
     [string] $SpoModulePath,
@@ -689,14 +692,21 @@ $stepActions = @{
         [ordered]@{ SignedIn = [bool] ($ctx -and $ctx.Account) }
     }
     'import-exo'             = {
-        $params = @{
-            Name            = 'ExchangeOnlineManagement'
-            RequiredVersion = $script:ExoVersion
-            ErrorAction     = 'Stop'
+        if (-not [string]::IsNullOrWhiteSpace($script:ExoModulePath)) {
+            # A saved (not installed) copy is imported by manifest path, same as GraphModulePath, so the installed
+            # 3.x is never touched and the version label comes from the copy actually loaded.
+            Import-Module -Name $script:ExoModulePath -ErrorAction Stop
         }
-        Import-Module @params
+        else {
+            $params = @{
+                Name            = 'ExchangeOnlineManagement'
+                RequiredVersion = $script:ExoVersion
+                ErrorAction     = 'Stop'
+            }
+            Import-Module @params
+        }
         $m = Get-Module -Name 'ExchangeOnlineManagement'
-        [ordered]@{ Version = $m.Version.ToString(); Path = $m.Path }
+        [ordered]@{ Version = $m.Version.ToString(); Path = $m.Path; Source = $(if ($script:ExoModulePath) { 'path' } else { 'installed' }) }
     }
     'connect-exo'            = { Invoke-ExoConnect }
     'connect-exo-disablewam' = { Invoke-ExoConnect -DisableWAM }
@@ -761,7 +771,7 @@ $result = [ordered]@{
     Instruction     = $definition.Instruction
     Expectation     = $definition.Expectation
     PlannedSteps    = @($definition.Steps)
-    Requested       = [ordered]@{ GraphVersion = $GraphVersion; ExoVersion = $ExoVersion; GraphModulePath = $GraphModulePath; ProbeModule = $ProbeModule }
+    Requested       = [ordered]@{ GraphVersion = $GraphVersion; ExoVersion = $ExoVersion; GraphModulePath = $GraphModulePath; ExoModulePath = $ExoModulePath; ProbeModule = $ProbeModule }
     Host            = [ordered]@{
         PSVersion            = $PSVersionTable.PSVersion.ToString()
         PSEdition            = $PSVersionTable.PSEdition
