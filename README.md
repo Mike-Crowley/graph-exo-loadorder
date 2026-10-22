@@ -132,7 +132,9 @@ two runtimes mapped, both `RuntimeBroker` copies live. The preview's P/Invokes a
 the binding is unchanged; with Graph 2.40.0 imported by path first (`pr-graph-connect-then-exo` with the saved 2.40.0
 manifest as `-GraphModulePath`), the preview still fails with the `RuntimeBroker` `NullReferenceException` and
 "Authenticator Factory has already been started". The rejection therefore belongs to the 0.19.4 runtime that was
-mapped first, not to the interop version of the second module.
+mapped first, not to the interop version of the second module. The other order with Graph 2.40.0 (`pr-exo-then-graph`,
+preview first) still fails with the `WithLogging` `MissingMethodException`: Graph 2.40.0 binds to the preview's MSAL
+4.90.0 in the default context, so the 2.40.0 failure is independent of which MSAL EXO ships.
 
 Keep the 2.40.0 evidence intact by giving the re-run its own `-ResultsPath` and `-ReportPath`. To report back on
 #3394, quote from `report-2.41.2.md`: the Summary table, Finding 6, the EXO-then-Graph rows of Finding 3, and the
