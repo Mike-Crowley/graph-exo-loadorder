@@ -81,6 +81,11 @@ param(
 
     [string] $GraphModulePath,
 
+    # Microsoft.Online.SharePoint.PowerShell manifest (imported by path) and tenant admin URL; enable the spo-* scenarios.
+    [string] $SpoModulePath,
+
+    [string] $SpoAdminUrl,
+
     [string] $ResultsPath = (Join-Path $PSScriptRoot 'results'),
 
     [string] $ReportPath = (Join-Path $PSScriptRoot 'report.md'),
@@ -110,7 +115,7 @@ $script:LoadFromHandler = 'System.Reflection.Assembly.LoadFromResolveHandler'
 
 function Test-Prerequisite {
     # Read-only checks. A missing exact version stops the run; nothing is ever installed from here.
-    param([bool] $NeedsPrBuild)
+    param([bool] $NeedsPrBuild, [bool] $NeedsSpo)
 
     $pwsh = Get-Command -Name pwsh -CommandType Application | Select-Object -First 1
     if (-not $pwsh) { throw 'pwsh was not found on PATH.' }
@@ -137,6 +142,13 @@ function Test-Prerequisite {
         if ($manifest.ContainsKey('NestedModules') -or $manifest.ContainsKey('RequiredAssemblies')) {
             Write-Warning 'The PR build manifest declares NestedModules or RequiredAssemblies; the PR expects neither (the psm1 initializes the load context first).'
         }
+    }
+
+    if ($NeedsSpo) {
+        if (-not (Test-Path -LiteralPath $SpoModulePath)) { throw ('SpoModulePath not found: {0}' -f $SpoModulePath) }
+        if ([string]::IsNullOrWhiteSpace($SpoAdminUrl)) { throw 'SpoAdminUrl is required for the spo-* scenarios.' }
+        $spoManifest = Import-PowerShellDataFile -Path $SpoModulePath
+        Write-Host ('  SharePoint Online module {0}: ModuleVersion {1}' -f $SpoModulePath, $spoManifest.ModuleVersion)
     }
 
     return [pscustomobject]@{ PwshPath = $pwsh.Source; PwshVersion = $pwshVersion; GraphPath = $graph.Path; ExoPath = $exo.Path; PrBuildVersion = $prBuildVersion }
@@ -209,6 +221,7 @@ function Invoke-Scenario {
     if ($TenantId) { $arguments += @('-TenantId', (Format-ProcessArgument -Value $TenantId)) }
     if ($UserPrincipalName) { $arguments += @('-UserPrincipalName', (Format-ProcessArgument -Value $UserPrincipalName)) }
     if ($definition.UsesPrBuild) { $arguments += @('-GraphModulePath', (Format-ProcessArgument -Value $GraphModulePath)) }
+    if ($definition.UsesSpo) { $arguments += @('-SpoModulePath', (Format-ProcessArgument -Value $SpoModulePath), '-SpoAdminUrl', (Format-ProcessArgument -Value $SpoAdminUrl)) }
 
     $params = @{
         FilePath     = $PwshPath
@@ -288,7 +301,7 @@ function Get-ShortLocation {
     # <module>\... keeps the report free of local profile paths; a source build shows as artifacts\... or prbuild\...
     param([string] $Location)
     if ([string]::IsNullOrEmpty($Location)) { return '(none)' }
-    $m = [regex]::Match($Location, '(?i)(Microsoft\.Graph\.Authentication|ExchangeOnlineManagement|Az\.Accounts|Microsoft\.PowerShell\.ThreadJob|artifacts|prbuild)\\.*$')
+    $m = [regex]::Match($Location, '(?i)(Microsoft\.Graph\.Authentication|ExchangeOnlineManagement|Az\.Accounts|Microsoft\.Online\.SharePoint\.PowerShell|Microsoft\.PowerShell\.ThreadJob|artifacts|prbuild)\\.*$')
     if ($m.Success) { return $m.Value }
     if ($env:USERPROFILE -and $Location.StartsWith($env:USERPROFILE, [System.StringComparison]::OrdinalIgnoreCase)) { return '~' + $Location.Substring($env:USERPROFILE.Length) }
     return $Location
@@ -304,6 +317,7 @@ function Get-RowOwner {
     if ($location -match '(?i)\\ExchangeOnlineManagement\\') { return 'EXO' }
     if ($location -match '(?i)\\Microsoft\.Graph\.Authentication\\|\\artifacts\\|\\prbuild\\') { return 'Graph' }
     if ($location -match '(?i)\\Az\.Accounts\\') { return 'Az' }
+    if ($location -match '(?i)\\Microsoft\.Online\.SharePoint\.PowerShell\\') { return 'SPO' }
     return 'other'
 }
 
@@ -993,6 +1007,31 @@ function New-Interpretation {
     }
     $lines += New-ClaimTable -Rows $rows
 
+    # ---------- Finding 7 ----------
+    $lines += '### Finding 7: a third module (SharePoint Online, patched for PowerShell 7)'
+    $lines += ''
+    $rows = @()
+    $spoNames = @($script:Definitions.Order | Where-Object { $script:Definitions.Scenarios[$_].UsesSpo })
+    $spoRan = @($spoNames | Where-Object { $Results[$_] })
+    if ($spoRan.Count -eq 0) {
+        $rows += New-Claim -Claim ($spoNames -join ', ') -Status 'Not run' -Evidence 'spo-* scenarios need -SpoModulePath and -SpoAdminUrl.'
+    }
+    foreach ($name in $spoRan) {
+        $r = $Results[$name]
+        $definition = $script:Definitions.Scenarios[$name]
+        $final = Get-FinalSnapshot -Result $r
+        $connects = @($r.Steps | Where-Object { $_.Name -like 'connect-*' })
+        $classes = @($connects | ForEach-Object { '{0}={1}' -f $_.Name, (Get-OutcomeClass -Step $_) }) -join '; '
+        $rows += New-Claim -Claim ('{0}: {1}' -f $name, $definition.Expectation) -Status 'Prediction' -Evidence ('Recorded before the run in scenarios.psd1. Outcome: {0}' -f $classes)
+        foreach ($c in $connects) { $rows += New-Claim -Claim ('{0}: {1}' -f $name, $c.Name) -Status 'Observed' -Evidence (Get-StepEvidence -ScenarioName $name -Step $c) }
+        $identity = @($final.Assemblies | Where-Object { $_.Name -match '^Microsoft\.Identity\.Client(\.Broker|\.NativeInterop)?$' } | ForEach-Object { '{0} {1} [{2}/{3}]' -f $_.Name, $_.Version, (Get-RowOwner -Row $_), $_.Context })
+        $rows += New-Claim -Claim ('{0}: MSAL, Broker and NativeInterop copies in the final snapshot' -f $name) -Status 'Observed' -Evidence ('{0}.json final Snapshot.Assemblies: {1}' -f $name, ($identity -join '; '))
+        $brokerStates = @(Get-Prop -Object $final -Name 'BrokerRuntimeState' | Where-Object { $_ })
+        $brokerText = @($brokerStates | ForEach-Object { '{0} [{1}]: created={2}, null={3}, init={4}' -f (Get-RowOwner -Row $_), $_.Context, $_.LazyCoreValueCreated, $_.CoreIsNull, $(if ($_.InitException) { $_.InitException.Properties.Status + ' "' + $_.InitException.Properties.Context + '"' } else { 'none' }) }) -join '; '
+        $rows += New-Claim -Claim ('{0}: native mappings, bare-name resolution, RuntimeBroker statics' -f $name) -Status 'Observed' -Evidence ('{0}.json final snapshot: NativeModules {1}; {2}; Broker copies: {3}' -f $name, (Get-NativeSummary -Snapshot $final), (Get-BareNameSummary -Snapshot $final).Text, $(if ($brokerText) { $brokerText } else { 'none loaded' }))
+    }
+    $lines += New-ClaimTable -Rows $rows
+
     # ---------- Implication ----------
     $lines += '### Implication for PR #3789'
     $lines += ''
@@ -1073,9 +1112,16 @@ function New-LoadOrderReport {
 
     $lines += New-Interpretation -Results $results
 
+    # Exception messages quote full file paths (a FileLoadException names the DLL it could not load), and those
+    # carry the Windows profile folder. Scrub every user-profile prefix once, here, so no table cell, stack line or
+    # transcript excerpt can leak it; the JSON keeps the real paths locally.
+    $content = $lines -join [Environment]::NewLine
+    if ($env:USERPROFILE) { $content = $content.Replace($env:USERPROFILE, '~') }
+    $content = [regex]::Replace($content, '(?i)[A-Z]:\\Users\\[^\\\s"''|]+', '~')
+
     $params = @{
         LiteralPath = $Path
-        Value       = ($lines -join [Environment]::NewLine)
+        Value       = $content
         Encoding    = 'utf8'
     }
     Set-Content @params
@@ -1135,6 +1181,10 @@ foreach ($name in $script:Definitions.Order) {
         if ($explicit) { throw ('{0} needs Az.Accounts installed as the non-WAM token source.' -f $name) }
         continue
     }
+    if ($definition.UsesSpo -and ([string]::IsNullOrWhiteSpace($SpoModulePath) -or [string]::IsNullOrWhiteSpace($SpoAdminUrl))) {
+        if ($explicit) { throw ('{0} needs -SpoModulePath and -SpoAdminUrl.' -f $name) }
+        continue
+    }
     $selected += $name
 }
 if ($selected.Count -eq 0) { throw 'No scenario selected.' }
@@ -1144,8 +1194,9 @@ if ($needsIdentity -and ([string]::IsNullOrWhiteSpace($TenantId) -or [string]::I
     throw 'TenantId and UserPrincipalName are required for every scenario except probe-only and imports-only.'
 }
 $needsPrBuild = @($selected | Where-Object { $script:Definitions.Scenarios[$_].UsesPrBuild }).Count -gt 0
+$needsSpo = @($selected | Where-Object { $script:Definitions.Scenarios[$_].UsesSpo }).Count -gt 0
 
-$prereq = Test-Prerequisite -NeedsPrBuild $needsPrBuild
+$prereq = Test-Prerequisite -NeedsPrBuild $needsPrBuild -NeedsSpo $needsSpo
 Write-Host ''
 
 $runs = @{}

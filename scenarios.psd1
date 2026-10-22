@@ -15,6 +15,11 @@
         'graph-connect-then-exo-disablewam'
         'graph-accesstoken-then-exo'
         'exo-then-graph'
+        'spo-only'
+        'spo-then-exo'
+        'exo-then-spo'
+        'graph-then-spo'
+        'spo-then-graph'
         'az-connect-then-exo'
         'pr-graph-import-then-exo'
         'pr-graph-connect-then-exo'
@@ -93,6 +98,38 @@
             Instruction = 'PR build. Sign in at the EXO WAM prompt. Then Graph: a prompt means WithLogging is fixed and the started-state is per mapped module.'
             Expectation = 'WithLogging failure should be gone; shows whether the already-started state is per mapped module or process-global.'
             UsesPrBuild = $true
+        }
+        # Third module: Microsoft.Online.SharePoint.PowerShell with its interop patched for PowerShell 7 (MSAL 4.82.0 .NET
+        # Framework build, Broker 4.82.0, NativeInterop 0.19.4 and msalruntime in the module root, all in Default).
+        'spo-only'                          = @{
+            Steps       = @('baseline', 'import-spo', 'connect-spo')
+            Instruction = 'One SharePoint Online prompt (WAM through the patched interop). Sign in.'
+            Expectation = 'Baseline: where SPO''s MSAL 4.82.0, Broker, NativeInterop 0.19.4 and msalruntime land, and whether the connect works on PowerShell 7 at all.'
+            UsesSpo     = $true
+        }
+        'spo-then-exo'                      = @{
+            Steps       = @('baseline', 'import-spo', 'connect-spo', 'import-exo', 'connect-exo')
+            Instruction = 'SharePoint prompt first: sign in. Then EXO: a failure before any prompt is the point; if a prompt appears, sign in or cancel.'
+            Expectation = 'Prediction: a managed clash, EXO asking for MSAL 4.83.1 with 4.82.0 (.NET Framework build) already in Default; no native second start, because both modules would share the one NativeInterop 0.19.4 copy already in Default.'
+            UsesSpo     = $true
+        }
+        'exo-then-spo'                      = @{
+            Steps       = @('baseline', 'import-exo', 'connect-exo', 'import-spo', 'connect-spo')
+            Instruction = 'EXO prompt first: sign in. Then SharePoint: sign in if it prompts.'
+            Expectation = 'Prediction: SPO''s 4.82.0 reference binds upward to EXO''s 4.83.1 already in Default and the connect works on one shared NativeInterop and msalruntime.'
+            UsesSpo     = $true
+        }
+        'graph-then-spo'                    = @{
+            Steps       = @('baseline', 'import-graph', 'connect-graph', 'import-spo', 'connect-spo')
+            Instruction = 'Graph signs in (silently if WAM holds the account). Then SharePoint: sign in if it prompts.'
+            Expectation = 'Prediction: SPO''s bare-name P/Invokes land on Graph''s msalruntime; with Graph 2.41.x (runtime shipped with NativeInterop 0.20.6) the second start is accepted, as it was for EXO.'
+            UsesSpo     = $true
+        }
+        'spo-then-graph'                    = @{
+            Steps       = @('baseline', 'import-spo', 'connect-spo', 'import-graph', 'connect-graph')
+            Instruction = 'SharePoint prompt first: sign in. Then Graph signs in (silently if WAM holds the account).'
+            Expectation = 'Prediction: Graph 2.41.x pins its own msalruntime through LoadUnmanagedDll and connects; two started runtimes in the process.'
+            UsesSpo     = $true
         }
     }
 }

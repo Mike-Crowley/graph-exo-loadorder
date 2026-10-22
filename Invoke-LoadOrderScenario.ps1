@@ -48,6 +48,12 @@ param(
 
     [string] $GraphModulePath,
 
+    # Microsoft.Online.SharePoint.PowerShell manifest, imported by path (the copy under test may be patched), and
+    # the tenant admin URL for Connect-SPOService. Both only matter to the spo-* scenarios.
+    [string] $SpoModulePath,
+
+    [string] $SpoAdminUrl,
+
     # Any binary module outside $PSHOME's TPA list exercises PowerShell's Assembly.LoadFrom path,
     # which is what registers System.Reflection.Assembly.LoadFromResolveHandler.
     [string] $ProbeModule = 'Microsoft.PowerShell.ThreadJob',
@@ -60,8 +66,8 @@ param(
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:TrackedAssemblyPattern = '^(Microsoft\.Identity|Microsoft\.IdentityModel|Azure\.(Identity|Core)|Microsoft\.Graph|Microsoft\.Exchange|Microsoft\.Kiota|Microsoft\.Azure\.PowerShell\.Authentication|Microsoft\.PowerShell\.ThreadJob)'
-$script:ScriptVersion = '2.2'
+$script:TrackedAssemblyPattern = '^(Microsoft\.Identity|Microsoft\.IdentityModel|Azure\.(Identity|Core)|Microsoft\.Graph|Microsoft\.Exchange|Microsoft\.Kiota|Microsoft\.Azure\.PowerShell\.Authentication|Microsoft\.Online\.SharePoint|Microsoft\.SharePoint|Microsoft\.PowerShell\.ThreadJob)'
+$script:ScriptVersion = '2.3'
 # Values that must never reach the JSON or the transcript; Protect-Text replaces them on every write.
 $script:Secrets = @()
 
@@ -153,7 +159,7 @@ function Get-ModuleOwnerMap {
     # Module roots at snapshot time, so every file location can be attributed to the module that shipped it
     # (a PR build of Graph lives outside the normal Modules folder, so a path pattern alone is not enough).
     $map = [ordered]@{}
-    foreach ($pair in @(@('Graph', 'Microsoft.Graph.Authentication'), @('EXO', 'ExchangeOnlineManagement'), @('Az', 'Az.Accounts'))) {
+    foreach ($pair in @(@('Graph', 'Microsoft.Graph.Authentication'), @('EXO', 'ExchangeOnlineManagement'), @('Az', 'Az.Accounts'), @('SPO', 'Microsoft.Online.SharePoint.PowerShell'))) {
         $m = Get-Module -Name $pair[1] | Select-Object -First 1
         if ($m -and $m.ModuleBase) { $map[$pair[0]] = $m.ModuleBase.TrimEnd('\') + '\' }
     }
@@ -470,7 +476,7 @@ function Get-LoadStateSnapshot {
     try { $snapshot.BrokerRuntimeState = @(Get-BrokerRuntimeState -OwnerMap $ownerMap) } catch { $snapshot.CaptureErrors += 'BrokerRuntimeState: {0}' -f $_.Exception.Message }
 
     try {
-        $snapshot.Modules = @(foreach ($m in (Get-Module -Name 'Microsoft.Graph.Authentication', 'ExchangeOnlineManagement', 'Az.Accounts')) {
+        $snapshot.Modules = @(foreach ($m in (Get-Module -Name 'Microsoft.Graph.Authentication', 'ExchangeOnlineManagement', 'Az.Accounts', 'Microsoft.Online.SharePoint.PowerShell')) {
                 [ordered]@{ Name = $m.Name; Version = $m.Version.ToString(); Path = $m.Path }
             })
     }
@@ -694,10 +700,31 @@ $stepActions = @{
     }
     'connect-exo'            = { Invoke-ExoConnect }
     'connect-exo-disablewam' = { Invoke-ExoConnect -DisableWAM }
+    'import-spo'             = {
+        if ([string]::IsNullOrWhiteSpace($script:SpoModulePath)) { throw 'SpoModulePath was not supplied; cannot run import-spo.' }
+        # Imported by manifest path. -SkipEditionCheck keeps PowerShell 7 from routing a Desktop-only manifest through
+        # Windows PowerShell compatibility, which would put the module in another process and hide any collision.
+        $params = @{
+            Name             = $script:SpoModulePath
+            SkipEditionCheck = $true
+            ErrorAction      = 'Stop'
+        }
+        Import-Module @params
+        $m = Get-Module -Name 'Microsoft.Online.SharePoint.PowerShell'
+        [ordered]@{ Version = $m.Version.ToString(); Path = $m.Path }
+    }
+    'connect-spo'            = {
+        if ([string]::IsNullOrWhiteSpace($script:SpoAdminUrl)) { throw 'SpoAdminUrl was not supplied; cannot run connect-spo.' }
+        Connect-SPOService -Url $script:SpoAdminUrl
+        # Connect-SPOService acquires its token during the connect; one cheap tenant read confirms the session is usable.
+        $tenantQueryOk = $false
+        try { $null = Get-SPOTenant -ErrorAction Stop; $tenantQueryOk = $true } catch { $tenantQueryOk = $false }
+        [ordered]@{ Connected = $true; TenantQueryOk = $tenantQueryOk }
+    }
 }
 
 # Steps where a sign-in UI may appear, so the operator is told to watch for it.
-$promptingSteps = @('connect-graph', 'connect-graph-cancel', 'connect-az', 'connect-exo', 'connect-exo-disablewam')
+$promptingSteps = @('connect-graph', 'connect-graph-cancel', 'connect-az', 'connect-exo', 'connect-exo-disablewam', 'connect-spo')
 
 #endregion step actions
 
@@ -707,6 +734,7 @@ $definitions = Import-PowerShellDataFile -Path (Join-Path $PSScriptRoot 'scenari
 $definition = $definitions.Scenarios[$Scenario]
 if (-not $definition) { throw "Scenario '$Scenario' is not defined in scenarios.psd1." }
 if ($definition.UsesPrBuild -and [string]::IsNullOrWhiteSpace($GraphModulePath)) { throw "Scenario '$Scenario' needs -GraphModulePath (a build of PR #3789)." }
+if ($definition.UsesSpo -and ([string]::IsNullOrWhiteSpace($SpoModulePath) -or [string]::IsNullOrWhiteSpace($SpoAdminUrl))) { throw "Scenario '$Scenario' needs -SpoModulePath and -SpoAdminUrl." }
 
 $script:OutFile = $OutFile
 $outDirectory = Split-Path -Path $OutFile -Parent
