@@ -136,6 +136,14 @@ mapped first, not to the interop version of the second module. The other order w
 preview first) still fails with the `WithLogging` `MissingMethodException`: Graph 2.40.0 binds to the preview's MSAL
 4.90.0 in the default context, so the 2.40.0 failure is independent of which MSAL EXO ships.
 
+Result of the 2026-11-11 run (`report-exo-3.11.1.md`; PowerShell 7.7.0 on .NET 11.0.0, Graph 2.41.2, ExchangeOnlineManagement
+3.11.1 GA, installed): the GA ships the preview's identity stack unchanged (same NativeInterop 0.20.6 and `msalruntime.dll` as
+Graph 2.41.2, still bare-name, no resolver). `probe-only` passes on .NET 11 and both orders connect. One trap seen on this
+machine: `Install-PSResource ExchangeOnlineManagement` satisfied the manifest's old RequiredModules by installing PowerShellGet
+1.1.0.0 and PackageManagement 1.1.0.0 into the user module folder, which then shadow the copies in `$PSHOME` and make every
+EXO import emit four Telemetry `Add-Type` errors (`import-exo` shows `nonterminating-error`; connect still works). Uninstall
+those two 1.1.0.0 copies and the import is clean; the report above was taken after that cleanup.
+
 Keep the 2.40.0 evidence intact by giving the re-run its own `-ResultsPath` and `-ReportPath`. To report back on
 #3394, quote from `report-2.41.2.md`: the Summary table, Finding 6, the EXO-then-Graph rows of Finding 3, and the
 Implication paragraph. Evidence paths in that report point at `results-2.41.2\<scenario>.json`.
